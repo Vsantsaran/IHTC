@@ -10,7 +10,7 @@
 				"-g",
 				"${file}",
 				"-o",
-				"${fileDirname}\\${fileBasenameNoExtension}.exe",
+				"${VS_Code}\\${Pihu_Version}.exe",
 				""
 			],
 			"options": {
