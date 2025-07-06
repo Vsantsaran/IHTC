@@ -864,34 +864,31 @@ int IHTP_Output::RoomAgeMix() const
   int r, d, g, p, min, max;
   unsigned i;
   for (r = 0; r < in.Rooms(); r++)
-	  for (d = 0; d < in.Days(); d++)
-	  {
-		  if (room_day_patient_list[r][d].size() > 0)
-		  {
-        p = room_day_patient_list[r][d][0];
-			  if(p<in.Patients())
-          min = in.PatientAgeGroup(room_day_patient_list[r][d][0]);
-        else
-          min = in.OccupantAgeGroup(room_day_patient_list[r][d][0]-in.Patients());
-			  max = min;
+    for (d = 0; d < in.Days(); d++)
+    {   if (room_day_patient_list[r][d].size() > 0)
+        {
+            p = room_day_patient_list[r][d][0];
+            if(p<in.Patients())
+                min = in.PatientAgeGroup(room_day_patient_list[r][d][0]);
+            else
+                min = in.OccupantAgeGroup(room_day_patient_list[r][d][0]-in.Patients());
+            max = min;
 		    for (i = 1; i < room_day_patient_list[r][d].size(); i++)
-			  {
-          p = room_day_patient_list[r][d][i];
-          if(p<in.Patients())
-			      g = in.PatientAgeGroup(room_day_patient_list[r][d][i]);
-          else
-            g = in.OccupantAgeGroup(room_day_patient_list[r][d][i]-in.Patients());
+            {   p = room_day_patient_list[r][d][i];
+                if(p<in.Patients())
+                    g = in.PatientAgeGroup(room_day_patient_list[r][d][i]);
+                else
+                    g = in.OccupantAgeGroup(room_day_patient_list[r][d][i]-in.Patients());
 			    if (g < min)
 				    min = g;
 			    else if (g > max)
 				    max = g;
-			    }
-			  if (max > min)
-        {
-          cost += max - min;
-          if (VERBOSE)
-             cout << "Room " << in.RoomId(r) << " is age-mixed " << min << "/" << max << " on day " << d << endl;
-        }
+            }
+            if (max > min)
+            {   cost += max - min;
+                if (VERBOSE)
+                    cout << "Room " << in.RoomId(r) << " is age-mixed " << min << "/" << max << " on day " << d << endl;
+            }
 		}
 	}
   return cost;

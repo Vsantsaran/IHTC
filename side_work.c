@@ -1,25 +1,7 @@
 #include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 
-void func(char *);
-
-void main (void) {
-    int arr[] = {3, 2, 6, 4, 6, 44, 3, 2, 1, 4}, *b = arr+4;
-    printf("%d", 2[arr]);
+void main(void) {
+	int a[4] = { 1, 2, 3, 4 }, **p = &a, ***q = p;
+	for (int i=0; i<4; ++i) printf("%d\t", a[i]);
+	printf("\n\nsizeof(p) = %d\nsizeof(a) = %d\nsizeof(q) = %d", sizeof(p), sizeof(a), sizeof(q));
 }
-
-// void main (void) {
-//     char *name, *ptr = "we are all humans and we must help each other with daily chores";
-//     name = (char *) calloc (strlen(ptr), sizeof(char));
-//     strcpy(name, ptr);
-//     puts(ptr);
-//     puts(name);
-//     func(ptr);
-//     // printf("size: %d\tsize: %d", strlen(ptr), strlen(name));
-//     free(name);
-// }
-
-// void func(char *ptr) {
-//     printf("size: %d", strlen(ptr));
-// }
