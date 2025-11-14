@@ -1,24 +1,13 @@
-// change: Changed the selection criterion: 50% of the time we are choosing the parent randomly for crossover and mutation.
-// And for the rest of the time we are exploiting the best solutions procured up till now by randomly choosing the parents from top-p best fitness chromosomes. 
-
-const int TOP_P = 10, POPULATION_SIZE = 10000, NUM_ITER = 200000, CONVERGENCE_STOPPING_CRITERION = 100, NURSE_SKILL_LEVEL_ALLOWANCE = 3, NURSE_MAX_LOAD_ALLOWANCE = 4;
-const float p_m = 5e-2f, THREASHOLD = 1000; // the maximum violation and cost of the chromosomes after normalization (inter/extra-polation)
-const float upper_bound = 0.9, lower_bound = 0.2, p_c = 0.8, pEXPLOITATION = 0.6;
-// TOP_P = 10 means that we will select the top 10 best chromosomes from population for crossover and mutation when not selecting randomly
-// Parent selection: 50% of the time we'll select random parents, 50% of the time we'll select parents randomly from the top-p performers
-
-// Define the structure for the linked list node
-typedef struct Node {
-    int fitness;
-    int chromosome_index;
-    struct Node* next;
-} Node;
+﻿int POP_SIZE = 8000, N_GEN = 120000, NURSE_SKILL_LEVEL_ALLOWANCE, NURSE_MAX_LOAD_ALLOWANCE, N_GEN_MANDATORY = 10000;
+float p_m = 5e-2f, THREASHOLD = 1000, upper_bound = 0.9, lower_bound = 0.2, p_c = 0.1;
+// THREASHOLD: the maximum violation and cost of the chromosomes after normalization (inter/extra-polation)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdbool.h>
 #include <time.h>
 #include "cJSON.h"
 #define NUM_THREADS 4
@@ -41,7 +30,7 @@ typedef struct Node {
             fprintf(stderr, "Assertion failed: %s\nFile: %s, Line: %d\n", message, __FILE__, __LINE__); \
             exit(EXIT_FAILURE); \
         } \
-    } while (0)
+    } while (false)
 
 // Enum types
 typedef enum {
@@ -89,8 +78,8 @@ typedef struct {
     int* workload_produced;
     int* skill_level_required;
     int is_admitted;
-    int num_nurses_alloted;
-    int* nurses_alloted;
+    int num_nurses_allotted;
+    int* nurses_allotted;
 } Occupants;
 
 typedef struct {
@@ -137,8 +126,8 @@ typedef struct {
     int occupants_cap;
     gender* gender_days_info;
     int* num_patients_info;
-    int* nurses_alloted;
-    int length_of_nurses_alloted;
+    int* nurses_allotted;
+    int length_of_nurses_allotted;
     gender gen;
 } Rooms;
 
@@ -163,15 +152,7 @@ shift_types string_to_shift_types(const char* str);
 int str2int(char* a);
 
 int CURR_ITER;
-void quicksort_fitness(int* indices, int low, int high);
-void swap(int* a, int* b);
-int partition_fitness(int* indices, int low, int high);
-
-//void insert_node(Node** head, int fitness, int index);
-//void sort_list(Node** head);
-
-//void print_top_n(Node* head, int n);
-int objectiveFunction(int*);
+int objectiveFunction(int*, char type);
 int excessiveNurseLoad();
 int countdistinctnurses_occupants(int o);
 int countdistinctnurses(int p);
@@ -233,7 +214,6 @@ shift_types string_to_shift_types(const char* str) {
     return early; // Invalid value
 }
 
-
 int str2int(char* a)
 {
     int number = 0;
@@ -255,15 +235,16 @@ Occupants* occupants = NULL; // Global pointer for occupants
 Patient* patients;
 Patient** mandatory_patients = NULL;
 Patient** optional_patients = NULL;
-char**** room_schedule;
-Surgeon* surgeon;
-OTs* ot;
-Rooms* room;
-Rooms_req** rooms_requirement;
+char**** room_schedule = NULL;
+Surgeon* surgeon = NULL;
+OTs* ot = NULL;
+Rooms* room = NULL;
+Rooms_req** rooms_requirement = NULL;
 
-int** POPULATION, * G_BEST, CHROMOSOME_SIZE_INTE_GA;
+int** POPULATION, * G_BEST, CHROMOSOME_SIZE_INTE_GA, ** MANDATORY_POPULATION;
 int** CROSSOVER_OFFSPRING_STORAGE_PLACE, ** CROSSOVER_PARENT_STORAGE_PLACE;
 int* MUTATED_OFFSPRING_STORAGE_PLACE, * MUTATE_PARENT_STORAGE_PLACE, * chromosome;
+// OTs** ot_data_arr, *** ot_days_data_arr;
 
 // Function to parse occupants
 void parse_occupants(cJSON* occupants_array) {
@@ -341,8 +322,8 @@ void parse_occupants(cJSON* occupants_array) {
             occupants[i].skill_level_required = NULL;
         }
         occupants[i].is_admitted = 1;
-        occupants[i].num_nurses_alloted = 0;
-        occupants[i].nurses_alloted = NULL;
+        occupants[i].num_nurses_allotted = 0;
+        occupants[i].nurses_allotted = NULL;
     }
 }
 
@@ -350,10 +331,10 @@ void free_occupants() {
     for (int i = 0; i < num_occupants; i++) {
         if (occupants[i].workload_produced) free(occupants[i].workload_produced);
         if (occupants[i].skill_level_required) free(occupants[i].skill_level_required);
-        if (occupants[i].nurses_alloted) free(occupants[i].nurses_alloted);
+        if (occupants[i].nurses_allotted) free(occupants[i].nurses_allotted);
     }
     free(occupants);
-	occupants = NULL; // Avoid dangling pointer
+    occupants = NULL; // Avoid dangling pointer
 }
 
 void assign_occupants_to_rooms(void) {
@@ -384,9 +365,10 @@ void parse_weights(cJSON* weights_json) {
     weights->unscheduled_optional = cJSON_GetObjectItem(weights_json, "unscheduled_optional") ? cJSON_GetObjectItem(weights_json, "unscheduled_optional")->valueint : 0;
 }
 
-
 void parse_patients(cJSON* patients_array) {
     num_patients = cJSON_GetArraySize(patients_array);
+	mandatory_count = 0; // Reset mandatory count
+	optional_count = 0; // Reset optional count
     // printf("Number of patients: %d\n", num_patients);
     patients = (Patient*)calloc(num_patients, sizeof(Patient));
     if (!patients) {
@@ -409,10 +391,15 @@ void parse_patients(cJSON* patients_array) {
         patients[i].assigned_ot = -1;
         // Parse individual fields of each patient
         cJSON* id_json = cJSON_GetObjectItem(item, "id");
-        int id_int = str2int(id_json->valuestring);
         if (id_json && cJSON_IsString(id_json)) {
+            int id_int = str2int(id_json->valuestring);
             patients[i].id = id_int;
         }
+        else {
+            printf("Missing or invalid ID for patient at index %d.\n", i);
+            patients[i].id = -1;
+        }
+
         cJSON* mandatory_json = cJSON_GetObjectItem(item, "mandatory");
         if (mandatory_json && cJSON_IsBool(mandatory_json)) {
             patients[i].mandatory = cJSON_IsTrue(mandatory_json) ? 1 : 0;
@@ -551,25 +538,28 @@ void parse_patients(cJSON* patients_array) {
             printf("Missing or invalid skill_level_required for patient at index %d.\n", i);
         }
         patients[i].is_admitted = 0;
+        patients[i].nurses_allotted = NULL; // Initialize to NULL
         patients[i].num_nurses_allotted = 0;
-        patients[i].nurses_allotted = (int*)calloc(2, sizeof(int));
     }
+    mandatory_patients = (Patient**)realloc(mandatory_patients, mandatory_count * sizeof(Patient*));
+    ASSERT(mandatory_patients, "Memory allocation failed for mandatory_patients.");
+    optional_patients = (Patient**)realloc(optional_patients, optional_count * sizeof(Patient*));
+	ASSERT(optional_patients, "Memory allocation failed for optional_patients.");
+    // Check if memory allocation was successful
     // Print counts for verification
-    // printf("Number of mandatory patients: %d\n", mandatory_count);
-    // printf("Number of optional patients: %d\n", optional_count);
+    printf("Number of mandatory patients: %d\n", mandatory_count);
+    printf("Number of optional patients: %d\n", optional_count);
 }
 
 void free_patients() {
-    if (!patients) {
-        return; // No need to free if patients is NULL
-    }
+    if (!patients) return; // No need to free if patients is NULL
     for (int i = 0; i < num_patients; i++) {
         if (patients[i].incompatible_room_ids) free(patients[i].incompatible_room_ids);
         if (patients[i].workload_produced) free(patients[i].workload_produced);
         if (patients[i].skill_level_required) free(patients[i].skill_level_required);
-		if (patients[i].nurses_allotted) free(patients[i].nurses_allotted);
+        if (patients[i].nurses_allotted) free(patients[i].nurses_allotted);
     }
-    free(patients);
+    if (patients) free(patients);
     patients = NULL; // Set to NULL to avoid dangling pointer issues
 }
 
@@ -628,8 +618,8 @@ void assign_patients_to_surgeon(void) {
                 surgeon[surgeon_index].current_size += 100;
                 surgeon[surgeon_index].patients_assigned = (int*)realloc(surgeon[surgeon_index].patients_assigned, (surgeon[surgeon_index].current_size) * sizeof(int));
             }
-        surgeon[surgeon_index].patients_assigned[surgeon[surgeon_index].num_assigned_patients] = patients[i].id;
-        surgeon[surgeon_index].num_assigned_patients++;  // Increment the assigned count
+        ASSERT(surgeon[surgeon_index].patients_assigned, "Dynamic Memory Allocation Error");
+        surgeon[surgeon_index].patients_assigned[surgeon[surgeon_index].num_assigned_patients++] = patients[i].id;
     }
 }
 
@@ -641,7 +631,7 @@ void free_surgeons() {
         if (surgeon[i].max_surgery_time) free(surgeon[i].max_surgery_time);
     }
 
-    free(surgeon); // Free the array of Surgeon structs
+    if (surgeon) free(surgeon); // Free the array of Surgeon structs
     surgeon = NULL; // Avoid dangling pointer
 }
 
@@ -699,7 +689,7 @@ void free_ots() {
         if (ot[i].time_left) free(ot[i].time_left);
     }
 
-    free(ot); // Free the array of OT structs
+    if (ot) free(ot); // Free the array of OT structs
     ot = NULL; // Avoid dangling pointer
 }
 
@@ -713,11 +703,10 @@ void parse_rooms(cJSON* room_array) {
     for (int i = 0; i < num_rooms; i++) {
         cJSON* item = cJSON_GetArrayItem(room_array, i);
         if (!item) continue;
-        room[i].length_of_nurses_alloted = 0;
-        room[i].nurses_alloted = NULL;
-        room[i].nurses_alloted = NULL;
+        room[i].length_of_nurses_allotted = 0;
+        room[i].nurses_allotted = NULL;
+        room[i].nurses_allotted = NULL;
         room[i].num_patients_info = (int*)calloc(days, sizeof(int));
-        for (int m = 0; m < days; m++) room[i].num_patients_info[m] = 0;
         room[i].gender_days_info = (gender*)calloc(days, sizeof(gender));
         for (int m = 0; m < days; m++) room[i].gender_days_info[m] = -1;
         cJSON* id_json = cJSON_GetObjectItem(item, "id");
@@ -731,6 +720,7 @@ void parse_rooms(cJSON* room_array) {
         if (capacity_json && cJSON_IsNumber(capacity_json)) room[i].cap = capacity_json->valueint;
         else printf("Missing or invalid capacity for room at index %d. Defaulting to 0.\n", i);
         room[i].gen = -1;
+	room[i].length_of_nurses_allotted = 0;
     }
 }
 
@@ -738,12 +728,12 @@ void free_rooms(void) {
     if (!room) return;
     int i;
     for (i = 0; i < num_rooms; ++i) {
-        if (room[i].nurses_alloted) free(room[i].nurses_alloted);
-		if (room[i].num_patients_info) free(room[i].num_patients_info);
-		if (room[i].gender_days_info) free(room[i].gender_days_info);
+        if (room[i].nurses_allotted) free(room[i].nurses_allotted);
+        if (room[i].num_patients_info) free(room[i].num_patients_info);
+        if (room[i].gender_days_info) free(room[i].gender_days_info);
     }
-    free(room);
-	room = NULL; // Avoid dangling pointer
+    if (room) free(room);
+    room = NULL; // Avoid dangling pointer
 }
 
 void parse_nurse(cJSON* nurses_array) {
@@ -817,7 +807,6 @@ void parse_nurse(cJSON* nurses_array) {
                         nurses[i].shift[j].max_load = -1; // Default error value
                         printf("Missing or invalid max load for nurse %d, shift %d.\n", i, j);
                     }
-                    nurses[i].shift[j].rooms = (int*)calloc(1, sizeof(int));  // Initialize rooms as NULL
                     nurses[i].shift[j].rooms = NULL;
                     nurses[i].shift[j].num_rooms = 0; // Initialize num_rooms to 0
                 }
@@ -840,8 +829,8 @@ void free_nurses() {
                         free(nurses[i].shift[j].rooms); // Free the rooms array if allocated
                 free(nurses[i].shift); // Free the shifts array for the nurse
             }
-        free(nurses); // Free the nurses array itself
-		nurses = NULL; // Avoid dangling pointer
+        if (nurses) free(nurses); // Free the nurses array itself
+        nurses = NULL; // Avoid dangling pointer
     }
 }
 
@@ -956,7 +945,8 @@ void print_ots(OTs* ots) {
         return;
     }
     for (int i = 0; i < num_ots; i++) {
-        printf("Max OT Time (by day): ");
+        printf("\nid: %d", ot[i].id);
+        printf("\nMax OT Time (by day): ");
         if (ot[i].max_ot_time) for (int j = 0; j < days; j++) printf("%d ", ot[i].max_ot_time[j]);
         else printf("No data available.");
 
@@ -1141,7 +1131,9 @@ void initialize_room_gender_map(int** room_gender_map) {
     }
 
     // Allocate memory for each row and initialize values to -1
-    for (int i = 0; i < num_rooms; i++) (*room_gender_map)[i] = -1;
+    for (int i = 0; i < num_rooms; i++) {
+        (*room_gender_map)[i] = -1;
+    }
 }
 
 void populate_room_gender_map(int** room_gender_map) {
@@ -1150,14 +1142,20 @@ void populate_room_gender_map(int** room_gender_map) {
         printf("Error: room_gender_map is not initialized.\n");
         return;
     }
-    for (int i = 0; i < num_rooms; ++i) (*room_gender_map)[i] = -1;
+    for (int i = 0; i < num_rooms; ++i) {
+        ((*room_gender_map)[i]) = -1;
+    }
 
     // Populate room_gender_map based on occupants
     for (int i = 0; i < num_occupants; ++i) {
         int room_id = occupants[i].room_id;
 
-        if (room_id >= 0 && room_id < num_rooms) (*room_gender_map)[room_id] = occupants[i].gen; // Correct indexing
-        else printf("Warning: Invalid room_id %d for occupant %d.\n", room_id, i);
+        if (room_id >= 0 && room_id < num_rooms) {
+            (*room_gender_map)[room_id] = occupants[i].gen; // Correct indexing
+        }
+        else {
+            printf("Warning: Invalid room_id %d for occupant %d.\n", room_id, i);
+        }
     }
 }
 
@@ -1169,11 +1167,10 @@ void print_map(int** room_gender_map) {
 //-----------------------------------------BELOW: QUICK SORT IMPLEMENTATION FOR THE OT ARRAY--------------------------------------
 
 int sorting_day;
-void print_ot_data_arr(OTs** ot_data_arr, int d) {
-    printf("Day: %d\n", d);
-    for (int i = 0; i < num_ots; i++) {
-        printf("id: %d -- max_ot_time: %d\n", ot_data_arr[i]->id, ot_data_arr[i]->max_ot_time[d]);
-    }
+void print_ot_data_arr(OTs** ot_data_ar, int d) {
+    printf("\nDay: %d\n", d);
+    for (int i = 0; i < num_ots; ++i)
+        printf("id: %d -- max_ot_time: %d\n", ot_data_ar[i]->id, ot_data_ar[i]->max_ot_time[d]);
 }
 
 int compare_ots(const void* a, const void* b) {
@@ -1182,7 +1179,10 @@ int compare_ots(const void* a, const void* b) {
 
     // Compare max_ot_time for the global sorting day
     if (ot_b->max_ot_time[sorting_day] != ot_a->max_ot_time[sorting_day]) {
-        return ot_b->max_ot_time[sorting_day] - ot_a->max_ot_time[sorting_day]; // Descending order
+        if (ot_b->max_ot_time[sorting_day] > ot_a->max_ot_time[sorting_day]) return 1;
+        else
+            if (ot_b->max_ot_time[sorting_day] < ot_a->max_ot_time[sorting_day]) return -1;
+        //return ot_b->max_ot_time[sorting_day] - ot_a->max_ot_time[sorting_day]; // Descending order
     }
     return ot_a->id - ot_b->id; // Secondary sort by id (ascending order)
 }
@@ -1208,6 +1208,8 @@ void initialize_3d_array() {
     // Allocate memory for room_schedule: 3D array (rooms x days x patients)
     room_schedule = (char****)calloc(num_rooms, sizeof(char***));  // Allocate space for rooms
     size_of_room_schedule = (int**)calloc(num_rooms, sizeof(int*));  // Allocate space for size tracking by room
+    ASSERT(room_schedule, "room_schedule could not be allocated memory");
+    ASSERT(size_of_room_schedule, "room_schedule could not be allocated memory");
 
     for (int i = 0; i < num_rooms; i++) {
         room_schedule[i] = (char***)calloc(days, sizeof(char**));  // Allocate space for days per room
@@ -1216,33 +1218,33 @@ void initialize_3d_array() {
 }
 
 void free_3d_array() {
-	// Free the 3D array
-	if (room_schedule) {
-		for (int i = 0; i < num_rooms; i++) {
-			if (room_schedule[i]) {
-				for (int j = 0; j < days; j++) {
-					if (room_schedule[i][j]) {
-						for (int k = 0; k < size_of_room_schedule[i][j]; k++) if (room_schedule[i][j][k]) free(room_schedule[i][j][k]); // Free each string
-						free(room_schedule[i][j]); // Free the array of strings
-					}
-				}
-				free(room_schedule[i]); // Free the array of days
-			}
-			free(size_of_room_schedule[i]); // Free the size tracking array
-		}
-		free(room_schedule); // Free the room schedule array
-		free(size_of_room_schedule); // Free the size tracking array
+    // Free the 3D array
+    if (room_schedule) {
+        for (int i = 0; i < num_rooms; i++) {
+            if (room_schedule[i]) {
+                for (int j = 0; j < days; j++) {
+                    if (room_schedule[i][j]) {
+                        for (int k = 0; k < size_of_room_schedule[i][j]; k++) if (room_schedule[i][j][k]) free(room_schedule[i][j][k]); // Free each string
+                        free(room_schedule[i][j]); // Free the array of strings
+                    }
+                }
+                free(room_schedule[i]); // Free the array of days
+            }
+            free(size_of_room_schedule[i]); // Free the size tracking array
+        }
+        free(room_schedule); // Free the room schedule array
+        free(size_of_room_schedule); // Free the size tracking array
         room_schedule = NULL; // Avoid dangling pointer
         size_of_room_schedule = NULL; // Avoid dangling pointer
-	}
+    }
 }
 
 char* id_to_str(char prefix, int id) {
-    char* result = (char*)calloc(12, sizeof(char)); // Enough space for prefix + number + null terminator
+    char* result = (char*)calloc(6, sizeof(char)); // Enough space for prefix + number + null terminator
     if (result == NULL) {
         return NULL; // Return NULL if memory allocation fails
     }
-    snprintf(result, 12, "%c%d", prefix, id); // Format the string
+    snprintf(result, 6, "%c%d", prefix, id); // Format the string
     return result;
 }
 
@@ -1285,14 +1287,21 @@ void put_occupants(void) {
     }
 }
 
-void create_3d_array(void) {
+void create_3d_array(char type) {
     initialize_3d_array();
-    int i, j, admission_day, r_id, los;
+    int i, j, admission_day, r_id, los, number;
 
     put_occupants();
-    for (i = 0; i < num_patients; ++i) {
-        if (patients[i].admission_day == -1) continue;
-
+    if (type == 'p') number = num_patients;
+    else 
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: create_3d_array");
+            exit(EXIT_FAILURE);
+        }
+    for (i = 0; i < number; ++i) {
+        if (patients[i].admission_day == -1 || (type == 'm' && !patients[i].mandatory)) continue;
         admission_day = patients[i].admission_day;
         r_id = patients[i].assigned_room_no;
         los = patients[i].length_of_stay;
@@ -1305,10 +1314,7 @@ void create_3d_array(void) {
                 int new_size = size_of_room_schedule[r_id][j] + 1;
                 char** temp = (char**)realloc(room_schedule[r_id][j], new_size * sizeof(char*));
 
-                if (!temp) {
-                    ASSERT(0, "Dynamic Memory Allocation Error.");
-                    return;
-                }
+                ASSERT(temp, "Dynamic Memory Allocation Error.");
 
                 room_schedule[r_id][j] = temp;
                 room_schedule[r_id][j][size_of_room_schedule[r_id][j]] = id_to_str('p', patients[i].id);
@@ -1316,7 +1322,7 @@ void create_3d_array(void) {
             }
             else {
                 // Corrected: Allocate memory properly
-                room_schedule[r_id][j] = (char**)calloc(2, sizeof(char*));
+                room_schedule[r_id][j] = (char**)calloc(1, sizeof(char*));
                 if (!room_schedule[r_id][j]) {
                     ASSERT(0, "Dynamic Memory Allocation Error.");
                     return;
@@ -1382,12 +1388,6 @@ void quicksort(Nurses** arr, int low, int high) {
     }
 }
 
-void sorting_nurse_id_max_load() {
-    for (int i = 0; i < 3 * days; i++)
-        if (current_size_dm_nurse[i] > 1)
-            quicksort(dm_nurses_availability[i], 0, current_size_dm_nurse[i] - 1);
-}
-
 void allocate_dm_nurses_availability() {
     dm_nurses_availability = (Nurses***)calloc(days * 3, sizeof(Nurses**));
     max_load_updated = (int**)calloc(num_nurses, (sizeof(int*)));
@@ -1415,14 +1415,6 @@ void allocate_dm_nurses_availability() {
     }
 }
 
-void initialize_current_size_dm_nurse() {
-    current_size_dm_nurse = (int*)calloc(days * 3, sizeof(int));
-    if (!current_size_dm_nurse) {
-        perror("Failed to allocate memory for current_size_dm_nurse");
-        exit(EXIT_FAILURE);
-    }
-}
-
 void allocate_sub_array(Nurses*** main_array, int index, int sub_size) {
     main_array[index] = (Nurses**)calloc(sub_size, sizeof(Nurses*));
     if (!main_array[index]) {
@@ -1443,7 +1435,11 @@ void append_to_sub_array(Nurses*** main_array, int index, int* current_sizes, Nu
 
 void create_dm_nurses_availability() {
     allocate_dm_nurses_availability();
-    initialize_current_size_dm_nurse();
+    current_size_dm_nurse = (int*)calloc(days * 3, sizeof(int));
+    if (!current_size_dm_nurse) {
+        perror("Failed to allocate memory for current_size_dm_nurse");
+        exit(EXIT_FAILURE);
+    }
     for (int i = 0; i < 3 * days; i++) allocate_sub_array(dm_nurses_availability, i, 2);
     for (int i = 0; i < num_nurses; i++) {
         for (int j = 0; j < nurses[i].num_shifts; j++) {
@@ -1452,7 +1448,7 @@ void create_dm_nurses_availability() {
                 fprintf(stderr, "\nInvalid index: %d\n", index);
                 continue;
             }
-            append_to_sub_array(dm_nurses_availability, index, current_size_dm_nurse, nurses+i);
+            append_to_sub_array(dm_nurses_availability, index, current_size_dm_nurse, nurses + i);
             max_load_updated[i][index] = nurses[i].shift[j].max_load;
             //printf("%d\n" , max_load_updated[i][index]);
         }
@@ -1460,12 +1456,12 @@ void create_dm_nurses_availability() {
 }
 
 void free_dm_nurses_availability() {
-	for (int i = 0; i < 3 * days; i++) if (dm_nurses_availability[i]) free(dm_nurses_availability[i]);
-	free(dm_nurses_availability);
-	dm_nurses_availability = NULL; // Avoid dangling pointer
-	for (int i = 0; i < num_nurses; i++) if (max_load_updated[i]) free(max_load_updated[i]);
-	free(max_load_updated);
-	max_load_updated = NULL; // Avoid dangling pointer
+    for (int i = 0; i < 3 * days; i++) if (dm_nurses_availability[i]) free(dm_nurses_availability[i]);
+    free(dm_nurses_availability);
+    dm_nurses_availability = NULL; // Avoid dangling pointer
+    for (int i = 0; i < num_nurses; i++) if (max_load_updated[i]) free(max_load_updated[i]);
+    free(max_load_updated);
+    max_load_updated = NULL; // Avoid dangling pointer
 }
 
 void print_dm_nurses() {
@@ -1499,6 +1495,7 @@ void initialize_rooms_req(int num_rooms) {
 }
 
 void create_rooms_req() {
+    initialize_rooms_req(num_rooms);
     for (int i = 0; i < num_rooms; i++) {
         for (int j = 0; j < days; j++) {
             if ((room_schedule[i][j] && !size_of_room_schedule[i][j]) || (!room_schedule[i][j] && size_of_room_schedule[i][j]))
@@ -1556,9 +1553,10 @@ void print_rooms_req() {
 }
 
 void cleanup_rooms_req(int num_rooms) {
+    if (rooms_requirement == NULL) { printf("rooms_requirement is already NULL!"); exit(EXIT_FAILURE); }
     for (int i = 0; i < num_rooms; i++) if (rooms_requirement[i]) free(rooms_requirement[i]);
     free(rooms_requirement);
-	rooms_requirement = NULL; // Avoid dangling pointer
+    rooms_requirement = NULL; // Avoid dangling pointer
 }
 
 void initialize_room_shift_nurse() {
@@ -1700,44 +1698,45 @@ void reset_valuesInteGA(void) {
     //reset the occupants structure values.
 
     int i, j;
+
     //patient_structure
-    for (int i = 0; i < num_patients; i++) {
+    for (i = 0; i < num_patients; i++) {
         patients[i].is_admitted = 0;
         patients[i].assigned_ot = -1;
         patients[i].assigned_room_no = -1;
         patients[i].admission_day = -1;
-        free(patients[i].nurses_allotted);
+        if (patients[i].nurses_allotted) free(patients[i].nurses_allotted);
         patients[i].nurses_allotted = NULL;
         patients[i].num_nurses_allotted = 0;
     }
 
     //room_structure
-    for (int i = 0; i < num_rooms; i++) {
+    for (i = 0; i < num_rooms; i++) {
         room[i].num_patients_allocated = 0;
         room[i].occupants_cap = 0;
         for (int j = 0; j < days; ++j) {
             room[i].num_patients_info[j] = 0;
             room[i].gender_days_info[j] = -1;
         }
-        free(room[i].nurses_alloted);
-		room[i].nurses_alloted = NULL;
-        room[i].length_of_nurses_alloted = 0;
+        if (room[i].nurses_allotted) free(room[i].nurses_allotted);
+        room[i].nurses_allotted = NULL;
+        room[i].length_of_nurses_allotted = 0;
     }
     //assign_occupants_to_rooms();
     update_num_patients_info();
 
     for (i = 0; i < num_nurses; ++i)
         for (j = 0; j < nurses[i].num_shifts; ++j) {
-            free(nurses[i].shift[j].rooms);
+            if (nurses[i].shift[j].rooms) free(nurses[i].shift[j].rooms);
             nurses[i].shift[j].rooms = NULL;
             nurses[i].shift[j].num_rooms = 0;
             nurses[i].shift[j].load_left = nurses[i].shift[j].max_load;
         }
 
     for (i = 0; i < num_occupants; ++i) {
-        free(occupants[i].nurses_alloted);
-		occupants[i].nurses_alloted = NULL;
-        occupants[i].num_nurses_alloted = 0;
+        if (occupants[i].nurses_allotted) free(occupants[i].nurses_allotted);
+        occupants[i].nurses_allotted = NULL;
+        occupants[i].num_nurses_allotted = 0;
     }
 
     //surgeon_structure
@@ -1766,10 +1765,10 @@ void sort_ot_days_data_arr(OTs*** ot_days_data_arr, int day) {
     qsort(ot_days_data_arr[day], num_ots, sizeof(OTs*), compare_ots);
 }
 
-int admitPatientsInteGA(int** room_gender_map, int* chromosome) {
-    int i, j, k, p_id, s_id, r_id, d, ot_id, max = 0, flag;
+int admitPatientsInteGA(int* chromosome, char type) {
+    int i, j, k, p_id, s_id, r_id, d, ot_id, max = 0, flag, number;
     int current_ot_index = 0, unscheduled_mandatory = 0, scheduled_optional = 0, scheduled_mandatory = 0;
-
+    
     // Allocate memory for OT scheduling data
     OTs** ot_data_arr = (OTs**)calloc(num_ots, sizeof(OTs*));
     OTs*** ot_days_data_arr = (OTs***)calloc(days, sizeof(OTs**)), * current_ot;
@@ -1825,19 +1824,46 @@ int admitPatientsInteGA(int** room_gender_map, int* chromosome) {
         exit(EXIT_FAILURE);
     }
 
+    // Initialize patient admission status (reset from previous runs)
+    for (i = 0; i < num_patients; i++) {
+        patients[i].is_admitted = 0;
+        patients[i].admission_day = -1;
+        patients[i].assigned_ot = -1;
+        patients[i].assigned_room_no = -1;
+    }
+
     // ------------------------------------------------------------ START SCHEDULING ------------------------------------------------------------
 
-    for (int p = 0; p < num_patients; ++p) {
-        p_id = chromosome[p];
+    for (int p = 0, count = 0; p < num_patients; ++p) {
+        if (type == 'm' && !patients[p].mandatory) continue;
+
+        p_id = chromosome[count++];
+
+        // Validate p_id is within bounds
+        if (p_id < 0 || p_id >= num_patients) {
+            fprintf(stderr, "Error: Invalid patient ID %d in chromosome\n", p_id);
+            continue;
+        }
+
         s_id = patients[p_id].surgeon_id;
+
+        // Validate surgeon ID
+        if (s_id < 0 || s_id >= num_surgeons) {
+            fprintf(stderr, "Error: Invalid surgeon ID %d for patient %d\n", s_id, p_id);
+            continue;
+        }
+
         flag = patients[p_id].mandatory;
 
         for (d = patients[p_id].surgery_release_day; d < days; ++d) {
-            // check if the due date has passed if the patient is mandatory?
+            // Check if the due date has passed if the patient is mandatory
             if (flag && patients[p_id].surgery_due_day < d) {
                 unscheduled_mandatory++;
+                unscheduled_mandatory_patients[p_id] = 1;  // Use p_id as index
+                printf("\nbreaking...\tunscheduled_mandatory found -> p_id: %d", p_id);
                 break;
             }
+
             if (surgeon[s_id].time_left[d] < patients[p_id].surgery_duration) continue;
 
             // --------------------------------------------------------------FINDING OT----------------------------------------------------------
@@ -1845,33 +1871,53 @@ int admitPatientsInteGA(int** room_gender_map, int* chromosome) {
             ot_id = -1;
             current_ot = NULL;
 
-	       // Looking for OTs available which have been assigned to other patients who also have the same surgeon
-	       for (j = 0; j < surgeon[s_id].num_assigned_patients; j++) {
-               if (patients[surgeon[s_id].patients_assigned[j]].admission_day != d) continue; // Patient not admitted on this day
-               if (ot[patients[surgeon[s_id].patients_assigned[j]].assigned_ot].time_left[d] < patients[p_id].surgery_duration) continue; 
-               current_ot = &ot[patients[surgeon[s_id].patients_assigned[j]].assigned_ot];
-	           ot_id = current_ot->id;
-    	       break;
-	       }
-	       if (current_ot == NULL)
-	        // If no OT found, look for the first available OT
-    	       while (current_ot_index < num_ots) {
-        	       current_ot = ot_days_data_arr[d][current_ot_index++];
-        	       if (current_ot->time_left[d] < patients[p_id].surgery_duration) continue;
-        	       ot_id = current_ot->id;
-        	       break;
-    	       }
-	       if (ot_id == -1) continue; // No suitable OT found
+            // Looking for OTs available which have been assigned to other patients who also have the same surgeon
+            for (j = 0; j < surgeon[s_id].num_assigned_patients; j++) {
+                int assigned_patient_id = surgeon[s_id].patients_assigned[j];
+
+                // Validate assigned patient ID
+                if (assigned_patient_id < 0 || assigned_patient_id >= num_patients) continue;
+
+                if (patients[assigned_patient_id].admission_day != d) continue; // Patient not admitted on this day
+
+                int assigned_ot_id = patients[assigned_patient_id].assigned_ot;
+                if (assigned_ot_id < 0 || assigned_ot_id >= num_ots) continue;
+
+                if (ot[assigned_ot_id].time_left[d] < patients[p_id].surgery_duration) continue;
+
+                current_ot = ot + assigned_ot_id;
+                ot_id = current_ot->id;
+                break;
+            }
+
+            if (current_ot == NULL) {
+                // If no OT found, look for the first available OT
+                while (current_ot_index < num_ots) {
+                    current_ot = ot_days_data_arr[d][current_ot_index++];
+                    if (!current_ot || current_ot->time_left[d] < patients[p_id].surgery_duration) continue;
+                    ot_id = current_ot->id;
+                    break;
+                }
+            }
+
+            if (ot_id == -1) continue; // No suitable OT found
 
             // --------------------------------------------------------------FINDING ROOM----------------------------------------------------------
-            r_id = findSuitableRoomInteGA(p_id, d); // check this function's working
+            r_id = findSuitableRoomInteGA(p_id, d);
             if (r_id == -1) continue; // No suitable room found
+
+            // Validate room ID
+            if (r_id < 0 || r_id >= num_rooms) {
+                fprintf(stderr, "Error: Invalid room ID %d returned\n", r_id);
+                continue;
+            }
 
             // --------------------------------------------------------------ADMIT PATIENT AND MODIFY ATTRIBUTES----------------------------------------------------------
             for (k = d; k < days && k < (d + patients[p_id].length_of_stay); k++) {
                 room[r_id].num_patients_info[k]++;
                 room[r_id].gender_days_info[k] = patients[p_id].gen;
             }
+
             room[r_id].num_patients_allocated++;
             room[r_id].gen = patients[p_id].gen;
             patients[p_id].admission_day = d;
@@ -1880,36 +1926,43 @@ int admitPatientsInteGA(int** room_gender_map, int* chromosome) {
             patients[p_id].is_admitted = 1;
             surgeon[s_id].time_left[d] -= patients[p_id].surgery_duration;
             ot[ot_id].time_left[d] -= patients[p_id].surgery_duration;
-            if (!flag) scheduled_optional++;
-            else scheduled_mandatory++;
-            surgeon_day_theatre_count[patients[p_id].surgeon_id][d][ot_id]++;
+
+            if (!flag) {
+                scheduled_optional++;
+                scheduled_optional_patients[p_id] = 1;
+            }
+            else {
+                scheduled_mandatory++;
+                scheduled_mandatory_patients[p_id] = 1;
+            }
+
+            // Validate surgeon_day_theatre_count indices
+            if (patients[p_id].surgeon_id >= 0 && patients[p_id].surgeon_id < num_surgeons &&
+                d >= 0 && d < days &&
+                ot_id >= 0 && ot_id < num_ots) {
+                surgeon_day_theatre_count[patients[p_id].surgeon_id][d][ot_id]++;
+            }
+
             break; // Move to the next patient after admitting one
         }
     }
 
-    // Count scheduled and unscheduled patients
-    for (i = 0; i < num_patients; i++) {
-        if (patients[i].mandatory && patients[i].admission_day == -1) {
-            unscheduled_mandatory++;
-            unscheduled_mandatory_patients[i] = 1;
-            continue;
-        }
-        if (patients[i].mandatory) {
-            scheduled_mandatory++;
-            scheduled_mandatory_patients[patients[i].id] = 1;
-            continue;
-        }
-        if (!patients[i].mandatory && patients[i].admission_day != -1) {
-            scheduled_optional++;
-            scheduled_optional_patients[patients[i].id] = 1;
-        }
+    // REMOVED: The redundant counting loop that was causing double counting
+    // The counts are already correctly maintained in the scheduling loop above
+
+    // Clean up memory
+    if (unscheduled_mandatory_patients) {
+        free(unscheduled_mandatory_patients);
+        unscheduled_mandatory_patients = NULL;
     }
-    free(unscheduled_mandatory_patients);
-    free(scheduled_mandatory_patients);
-    free(scheduled_optional_patients);
-    unscheduled_mandatory_patients = NULL;
-    scheduled_mandatory_patients = NULL;
-    scheduled_optional_patients = NULL; // Avoid dangling pointers
+    if (scheduled_mandatory_patients) {
+        free(scheduled_mandatory_patients);
+        scheduled_mandatory_patients = NULL;
+    }
+    if (scheduled_optional_patients) {
+        free(scheduled_optional_patients);
+        scheduled_optional_patients = NULL;
+    }
     for (i = 0; i < days; ++i) free(ot_days_data_arr[i]);
     free(ot_days_data_arr);
     free(ot_data_arr);
@@ -1920,15 +1973,16 @@ int admitPatientsInteGA(int** room_gender_map, int* chromosome) {
 }
 
 int findSuitableRoomInteGA(int p_id, int d) {
+    int i, j, k, flag;
     gender g = patients[p_id].gen;
     char* age = patients[p_id].age_group;
     int room_to_be_assigned = -1;
 
     // Check non-empty rooms (already assigned gender)
-    for (int i = 0; i < num_rooms; i++) {
-        int flag = 0;
+    for (i = 0; i < num_rooms; i++) {
+        flag = 0;
         // Check room's gender for each day of the patient's stay AND // Check room capacity for each day of stay
-        for (int j = d; j < days && j < d + patients[p_id].length_of_stay; j++) {
+        for (j = d; j < days && j < d + patients[p_id].length_of_stay; j++) {
             if (room[i].gender_days_info[j] != g || room[i].cap <= room[i].num_patients_info[j]) {
                 flag = 1;
                 break;
@@ -1939,7 +1993,7 @@ int findSuitableRoomInteGA(int p_id, int d) {
         // Check age group compatibility
         // if (strcmp(room[i].age_group, age) != 0) continue;
         // Check incompatible rooms
-        for (int k = 0; k < patients[p_id].num_incompatible_rooms; k++) {
+        for (k = 0; k < patients[p_id].num_incompatible_rooms; k++) {
             if (room[i].id == patients[p_id].incompatible_room_ids[k]) {
                 flag = 1;
                 break;
@@ -1948,14 +2002,14 @@ int findSuitableRoomInteGA(int p_id, int d) {
         if (flag) continue;
 
         // Assign room and set gender for all days
-        for (int j = d; j < days && j < d + patients[p_id].length_of_stay; j++) room[i].gender_days_info[j] = g;
+        for (j = d; j < days && j < d + patients[p_id].length_of_stay; j++) room[i].gender_days_info[j] = g;
         return room[i].id;
     }
 
     // Check empty rooms (gender not set)
-    for (int i = 0; i < num_rooms; i++) {
-        int flag = 0;
-        for (int j = d; j < days && j < d + patients[p_id].length_of_stay; j++) {
+    for (i = 0; i < num_rooms; i++) {
+        flag = 0;
+        for (j = d; j < days && j < d + patients[p_id].length_of_stay; j++) {
             if (room[i].gender_days_info[j] != -1 || room[i].cap <= room[i].num_patients_info[j]) {
                 flag = 1;
                 break;
@@ -1964,7 +2018,7 @@ int findSuitableRoomInteGA(int p_id, int d) {
         if (flag) continue;
 
         // Check incompatible rooms
-        for (int k = 0; k < patients[p_id].num_incompatible_rooms; k++) {
+        for (k = 0; k < patients[p_id].num_incompatible_rooms; k++) {
             if (room[i].id == patients[p_id].incompatible_room_ids[k]) {
                 flag = 1;
                 break;
@@ -1973,7 +2027,7 @@ int findSuitableRoomInteGA(int p_id, int d) {
         if (flag) continue;
 
         // Assign room and set gender for all days
-        for (int j = d; j < days && j < d + patients[p_id].length_of_stay; j++) room[i].gender_days_info[j] = g;
+        for (j = d; j < days && j < d + patients[p_id].length_of_stay; j++) room[i].gender_days_info[j] = g;
         return room[i].id;
     }
 
@@ -1987,18 +2041,17 @@ int findSuitableRoomInteGA(int p_id, int d) {
 //-------------------------------------------------------BELOW: FUNCTION DEFINITIONS FOR GA-----------------------------------------------------------
 
 // all taken from ihtc_ga.c
-void swapGenesInteGA(int, int, int);
 void freeDataStructuresInteGA(void);
-void applyIntegratedGA(void);
-void evaluateViolationsAndCost(int* chromosome);
+void applyIntegratedGA(char type);
+void evaluateViolationsAndCost(int* chromosome, char type);
 void crossoverTournamentSelectionInteGA(void);
 void mutationTournamentSelectionInteGA(void);
 void generatePopulationInteGA(void);
-void mutationElitismInteGA(void);
-void crossoverElitismInteGA(void);
-void orderCrossoverInteGA(void);
-void printPopulationInteGA(void);
-void swapMutationInteGA(void);
+bool mutationElitismInteGA(char type);
+bool crossoverElitismInteGA(char type);
+void orderCrossoverInteGA(char type);
+void printPopulationInteGA(char);
+void swapMutationInteGA(char type);
 void generateNewChromosomeInteGA(int chromo_num);
 
 int findViolations(void);
@@ -2006,36 +2059,57 @@ int findCost(void);
 int patient_delay(void);
 int elective_unscheduled_patients(void);
 int open_operating_theatre(void);
+//int room_age_mix(void);
 int skill_level_mix(void);
 int surgeon_transfer(void);
 
 //-------------------------------------------------------ABOVE: FUNCTION DEFINITIONS FOR GA-----------------------------------------------------------
 
-void printPopulationInteGA(void)
+void printPopulationInteGA(char type)
 {
-    int i, j;
-    for (i = 0; i < POPULATION_SIZE; ++i) {
+    int i, j, number;
+    if (type == 'm') number = mandatory_count;
+    if (type == 'p') number = num_patients;
+
+    for (i = 0; i < POP_SIZE; ++i) {
         printf("Chromosome %d: ", i + 1);
-        for (j = 0; j < CHROMOSOME_SIZE_INTE_GA; ++j)
+        for (j = 0; j < number; ++j)
             printf("%d ", POPULATION[i][j]);
         putchar('\n');
     }
 }
 
-void orderCrossoverInteGA(void) {
-    int r1, r2, i, k, m;
-    if (CHROMOSOME_SIZE_INTE_GA == 0) return;
+void orderCrossoverInteGA(char type) {
+    int r1, r2, i, k, m, number;
+    int actual_chromosome_size = CHROMOSOME_SIZE_INTE_GA - 5; // Exclude last 5 positions for objectives/fitness
+
+    if (type == 'p') number = num_patients;
+    else if (type == 'm') number = mandatory_count;
+    else {
+        printf("\nWrong type given: %c", type);
+        printf("function: orderCrossoverInteGA");
+        exit(EXIT_FAILURE);
+    }
+    // if (number != actual_chromosome_size) printf("\nError: number[%d] != Chromosome size - 5 [%d]\n", number, actual_chromosome_size);
+    if (actual_chromosome_size <= 0) return;
+
+    // Use the larger of the two for visited array allocation to handle all possible gene values
+    int visited_array_size = actual_chromosome_size;
+
     bool* visited1 = (bool*)calloc(num_patients, sizeof(bool));
     bool* visited2 = (bool*)calloc(num_patients, sizeof(bool));
 
     if (!visited1 || !visited2) {
         printf("Memory allocation failed!\n");
+        if (visited1) free(visited1);
+        if (visited2) free(visited2);
         exit(1);
     }
 
+    // Generate crossover points within actual chromosome bounds (excluding last 5 positions)
     do {
-        r1 = rand() % (num_patients);
-        r2 = rand() % (num_patients);
+        r1 = rand() % actual_chromosome_size;
+        r2 = rand() % actual_chromosome_size;
     } while (r1 == r2);
 
     if (r1 > r2) {
@@ -2044,66 +2118,131 @@ void orderCrossoverInteGA(void) {
         r2 = temp;
     }
 
-    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; i++) {
+    // Initialize offspring arrays (only the gene portion, not the objective/fitness part)
+    for (i = 0; i < actual_chromosome_size; i++) {
         CROSSOVER_OFFSPRING_STORAGE_PLACE[0][i] = -1;
         CROSSOVER_OFFSPRING_STORAGE_PLACE[1][i] = -1;
     }
 
+    // Copy genes between crossover points and mark as visited
     for (i = r1; i <= r2; i++) {
         int gene1 = CROSSOVER_PARENT_STORAGE_PLACE[0][i];
         int gene2 = CROSSOVER_PARENT_STORAGE_PLACE[1][i];
 
-        CROSSOVER_OFFSPRING_STORAGE_PLACE[0][i] = gene1;
-        CROSSOVER_OFFSPRING_STORAGE_PLACE[1][i] = gene2;
-
-        visited1[gene1] = true;
-        visited2[gene2] = true;
-    }
-
-    k = (r2 + 1) % num_patients;
-    m = k;
-
-    for (i = 0; i < num_patients; i++) {
-        int index = (r2 + 1 + i) % num_patients;
-
-        int gene1 = CROSSOVER_PARENT_STORAGE_PLACE[1][index];
-        if (!visited1[gene1]) {
-            if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][k] != -1) {
-                k = (k + 1) % num_patients;
-            }
-            CROSSOVER_OFFSPRING_STORAGE_PLACE[0][k] = gene1;
+        // Bounds check for gene values (genes should be valid patient IDs)
+        if (gene1 >= 0) {
+            CROSSOVER_OFFSPRING_STORAGE_PLACE[0][i] = gene1;
             visited1[gene1] = true;
         }
+        else {
+            // Handle invalid gene - this shouldn't happen but add safety
+            printf("Warning: Invalid gene1 value %d at position %d\n", gene1, i);
+        }
 
-        int gene2 = CROSSOVER_PARENT_STORAGE_PLACE[0][index];
-        if (!visited2[gene2]) {
-            if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][m] != -1) {
-                m = (m + 1) % num_patients;
-            }
-            CROSSOVER_OFFSPRING_STORAGE_PLACE[1][m] = gene2;
+        if (gene2 >= 0) {
+            CROSSOVER_OFFSPRING_STORAGE_PLACE[1][i] = gene2;
             visited2[gene2] = true;
+        }
+        else {
+            // Handle invalid gene - this shouldn't happen but add safety
+            printf("Warning: Invalid gene2 value %d at position %d\n", gene2, i);
         }
     }
 
-    for (i = 0; i < 2; ++i) for (int j = 0; j < 5; ++j) CROSSOVER_OFFSPRING_STORAGE_PLACE[i][num_patients + j] = -1;
+    // Fill remaining positions using order crossover logic
+    k = (r2 + 1) % actual_chromosome_size;
+    m = k;
 
-    free(visited1);
-    free(visited2);
-	visited1 = NULL;
-	visited2 = NULL; // Avoid dangling pointers
+    for (i = 0; i < actual_chromosome_size; i++) {
+        int index = (r2 + 1 + i) % actual_chromosome_size;
+
+        // Process first offspring
+        int gene1 = CROSSOVER_PARENT_STORAGE_PLACE[1][index];
+        if (gene1 >= 0 && !visited1[gene1]) {
+            // Find next empty position in offspring 1
+            while (k < actual_chromosome_size && CROSSOVER_OFFSPRING_STORAGE_PLACE[0][k] != -1) {
+                k = (k + 1) % actual_chromosome_size;
+            }
+            if (k < actual_chromosome_size) {
+                CROSSOVER_OFFSPRING_STORAGE_PLACE[0][k] = gene1;
+                visited1[gene1] = true;
+            }
+        }
+
+        // Process second offspring
+        int gene2 = CROSSOVER_PARENT_STORAGE_PLACE[0][index];
+        if (gene2 >= 0 && !visited2[gene2]) {
+            // Find next empty position in offspring 2
+            while (m < actual_chromosome_size && CROSSOVER_OFFSPRING_STORAGE_PLACE[1][m] != -1) {
+                m = (m + 1) % actual_chromosome_size;
+            }
+            if (m < actual_chromosome_size) {
+                CROSSOVER_OFFSPRING_STORAGE_PLACE[1][m] = gene2;
+                visited2[gene2] = true;
+            }
+        }
+    }
+
+    // Handle any remaining empty positions (fill with valid unused genes)
+    for (i = 0; i < actual_chromosome_size; i++) {
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][i] == -1) {
+            // Find an unused gene for offspring 1 (genes are patient IDs from 0 to number-1)
+            for (int j = 0; j < number; j++) {
+                if (!visited1[j]) {
+                    CROSSOVER_OFFSPRING_STORAGE_PLACE[0][i] = j;
+                    visited1[j] = true;
+                    break;
+                }
+            }
+        }
+
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][i] == -1) {
+            // Find an unused gene for offspring 2 (genes are patient IDs from 0 to number-1)
+            for (int j = 0; j < number; j++) {
+                if (!visited2[j]) {
+                    CROSSOVER_OFFSPRING_STORAGE_PLACE[1][i] = j;
+                    visited2[j] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Copy objective values and fitness from parents to offspring (last 5 positions)
+    // These will be recalculated later, but we preserve the structure
+    for (i = actual_chromosome_size; i < CHROMOSOME_SIZE_INTE_GA; i++) {
+        CROSSOVER_OFFSPRING_STORAGE_PLACE[0][i] = CROSSOVER_PARENT_STORAGE_PLACE[0][i];
+        CROSSOVER_OFFSPRING_STORAGE_PLACE[1][i] = CROSSOVER_PARENT_STORAGE_PLACE[1][i];
+    }
+
+    // Clean up memory
+    if (visited1) free(visited1);
+    if (visited2) free(visited2);
+    visited1 = NULL;
+    visited2 = NULL;
 }
 
 //----------------------------------BELOW: FUNCTION DEFINITIONS FOR MUTATION: SWAP, INSERT, INVERSION Mutations-----------------------------
 
-void swapMutationInteGA(void)
+void swapMutationInteGA(char type)
 {   // take the offspring from MUTATED_OFFSPRING_STORAGE_PLACE and mutate it using SWAP MUTATION method
     int r1, r2, i, j;
-    //p_m = abs((iter / (float)NUM_ITER) - p_m);
+    //p_m = abs((iter / (float)N_GEN) - p_m);
 
     /*
     iter == 0 -> p_m = 50% biased mutation
-    iter == NUM_ITER -> p_m = 10% biased mutation
+    iter == N_GEN -> p_m = 10% biased mutation
     */
+    int number;
+
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: swapMutationInteGA");
+            exit(EXIT_FAILURE);
+        }
 
     memcpy(MUTATED_OFFSPRING_STORAGE_PLACE, MUTATE_PARENT_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
 
@@ -2114,8 +2253,8 @@ void swapMutationInteGA(void)
     else {
         // select two random patients
         do {
-            r1 = rand() % num_patients;
-            r2 = rand() % num_patients;
+            r1 = rand() % number;
+            r2 = rand() % number;
             swap_mutation_r1 = r1; // Store for future use
             swap_mutation_r2 = r2; // Store for future use
         } while (r1 == r2);
@@ -2141,12 +2280,12 @@ void swapMutationInteGA(void)
 
         if (!patients[MUTATED_OFFSPRING_STORAGE_PLACE[r2]].mandatory) {
             // select the nearest mandatory patient
-            for (i = r2 + 1; i < num_patients; ++i)
+            for (i = r2 + 1; i < number; ++i)
                 if (patients[MUTATED_OFFSPRING_STORAGE_PLACE[i]].mandatory) {
                     r2 = i;
                     break;
                 }
-            if (i == num_patients)
+            if (i == number)
                 for (i = r2 - 1; i > r1; --i)
                     if (patients[MUTATED_OFFSPRING_STORAGE_PLACE[i]].mandatory) {
                         r2 = i;
@@ -2161,11 +2300,21 @@ void swapMutationInteGA(void)
     MUTATED_OFFSPRING_STORAGE_PLACE[r2] = MUTATED_OFFSPRING_STORAGE_PLACE[r1] - MUTATED_OFFSPRING_STORAGE_PLACE[r2];
     MUTATED_OFFSPRING_STORAGE_PLACE[r1] -= MUTATED_OFFSPRING_STORAGE_PLACE[r2];
 
-    for (i = 0; i < 5; ++i) MUTATED_OFFSPRING_STORAGE_PLACE[num_patients + i] = -1;
+    for (i = 0; i < 5; ++i) MUTATED_OFFSPRING_STORAGE_PLACE[number + i] = 0;
 }
 
-void insertMutationInteGA(void)
-{   int from, to, i;
+void insertMutationInteGA(char type)
+{
+    int from, to, i, number;
+
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: insertMutationInteGA");
+            exit(EXIT_FAILURE);
+        }
 
     memcpy(MUTATED_OFFSPRING_STORAGE_PLACE, MUTATE_PARENT_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
 
@@ -2176,8 +2325,8 @@ void insertMutationInteGA(void)
     }
     else {
         do {
-            from = rand() % num_patients;
-            to = rand() % num_patients;
+            from = rand() % number;
+            to = rand() % number;
             insert_mutation_r1 = from; // Store for future use
             insert_mutation_r2 = to; // Store for future use
         } while (from == to);
@@ -2190,11 +2339,21 @@ void insertMutationInteGA(void)
     else for (int i = from; i > to; i--) MUTATED_OFFSPRING_STORAGE_PLACE[i] = MUTATED_OFFSPRING_STORAGE_PLACE[i - 1];
     MUTATED_OFFSPRING_STORAGE_PLACE[to] = gene;
 
-    for (i = 0; i < 5; ++i) MUTATED_OFFSPRING_STORAGE_PLACE[num_patients + i] = -1;
+    for (i = 0; i < 5; ++i) MUTATED_OFFSPRING_STORAGE_PLACE[number + i] = -1;
 }
 
-void inversionMutationInteGA(void)
-{   int start, end, i;
+void inversionMutationInteGA(char type)
+{
+    int start, end, i, number;
+
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: inversionMutationInteGA");
+            exit(EXIT_FAILURE);
+        }
 
     // Pick two distinct positions such that start < end
     if (inversion_mutation_r1 != -1 && inversion_mutation_r2 != -1) {
@@ -2203,8 +2362,8 @@ void inversionMutationInteGA(void)
     }
     else {
         do {
-            start = rand() % num_patients;
-            end = rand() % num_patients;
+            start = rand() % number;
+            end = rand() % number;
             inversion_mutation_r1 = start; // Store for future use
             inversion_mutation_r2 = end; // Store for future use
         } while (start == end);
@@ -2224,34 +2383,11 @@ void inversionMutationInteGA(void)
         start++;
         end--;
     }
-    
-    for (i = 0; i < 5; ++i) MUTATED_OFFSPRING_STORAGE_PLACE[num_patients + i] = -1;
+
+    for (i = 0; i < 5; ++i) MUTATED_OFFSPRING_STORAGE_PLACE[number + i] = -1;
 }
 
 //----------------------------------ABOVE: FUNCTION DEFINITIONS FOR MUTATION: SWAP, INSERT, INVERSION Mutations-----------------------------
-
-void swapGenesInteGA(int chromo_num, int i, int j) {
-    POPULATION[chromo_num][i] += POPULATION[chromo_num][j];
-    POPULATION[chromo_num][j] = POPULATION[chromo_num][i] - POPULATION[chromo_num][j];
-    POPULATION[chromo_num][i] -= POPULATION[chromo_num][j];
-}
-
-void generateNewChromosomeInteGA(int chromo_num)
-{
-    int j, r1, r2;
-
-    // copy all the genes from (chrmo_num-1)th chrmosome to (chromo_num)th chromosome
-    for (j = 0; j < CHROMOSOME_SIZE_INTE_GA; ++j) POPULATION[chromo_num][j] = POPULATION[chromo_num - 1][j];
-
-    for (j = 0; j < CHROMOSOME_SIZE_INTE_GA; ++j) {
-        do {
-            r1 = rand() % (num_patients);
-            r2 = rand() % (num_patients);
-        } while (r1 == r2);
-
-        swapGenesInteGA(chromo_num, r1, r2);
-    }
-}
 
 void update_num_patients_info() {
     int i, r_id, j;
@@ -2264,148 +2400,296 @@ void update_num_patients_info() {
     }
 }
 
-void normalize(void) {
+void normalize(char type) {
     /* normalize the violations and cost of the chromosomes
     * Use the same Obj.- Func. Only the violations and cost have be extrapolated and interpolated, respectively between 0 and 10000.
     */
-    int i, v_floor, c_floor;
+    int i, v_floor, c_floor, number;
     float v, c;
     int max_violations = 0, max_cost = 0;
-    for (i = 0; i < POPULATION_SIZE; ++i) {
-        if (POPULATION[i][num_patients] > max_violations) max_violations = POPULATION[i][num_patients];
-        if (POPULATION[i][num_patients + 1] > max_cost) max_cost = POPULATION[i][num_patients + 1];
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: normalize");
+            exit(EXIT_FAILURE);
+        }
+
+    for (i = 0; i < POP_SIZE; ++i) {
+        if (POPULATION[i][number] > max_violations) max_violations = POPULATION[i][number];
+        if (POPULATION[i][number + 1] > max_cost) max_cost = POPULATION[i][number + 1];
     }
-    for (i = 0; i < POPULATION_SIZE; ++i) {
-        v = (POPULATION[i][num_patients] * THREASHOLD) / max_violations;
-        c = (POPULATION[i][num_patients + 1] * THREASHOLD) / max_cost;
+    for (i = 0; i < POP_SIZE; ++i) {
+        v = (POPULATION[i][number] * THREASHOLD) / max_violations;
+        c = (POPULATION[i][number + 1] * THREASHOLD) / max_cost;
         v_floor = v;
         c_floor = c;
         if ((v_floor + 0.5) < v) v_floor++;
         if ((c_floor + 0.5) < c) c_floor++;
-        POPULATION[i][num_patients + 2] = v_floor;
-        POPULATION[i][num_patients + 3] = c_floor;
+        POPULATION[i][number + 2] = v_floor;
+        POPULATION[i][number + 3] = c_floor;
     }
 }
 
-void applyIntegratedGA(void)
+void applyIntegratedGA(char type)
 {
-    int i, j, k, last_improvement = 0, last_improvement_iter = 0, v_floor, c_floor, max_violations, max_cost;
+    int i, j, k, last_improvement = 0, last_improvement_iter = 0, v_floor, c_floor, max_violations, max_cost, number, gen;
     float v, c;
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: applyIntegratedGA");
+            exit(EXIT_FAILURE);
+        }
 
-    generatePopulationInteGA();
-    for (i = 0; i < POPULATION_SIZE; ++i) evaluateViolationsAndCost(POPULATION[i]);
-    normalize(); // normalize all the violations and costs of the chromosomes, i.e. bring them in the 0 to "THREASHOLD" range
-    for (i = 0; i < POPULATION_SIZE; ++i) POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(POPULATION[i]);
+    if (type == 'm') generatePopulationInteGA();
+    //printPopulationInteGA();
+    for (i = 0; i < POP_SIZE; ++i) evaluateViolationsAndCost(POPULATION[i], type);
+    normalize(type); // normalize all the violations and costs of the chromosomes, i.e. bring them in 0 to "THREASHOLD" range
+
+    for (i = 0; i < POP_SIZE; ++i) POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(POPULATION[i], type);
     memcpy(G_BEST, POPULATION[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
-    for (i = 1; i < POPULATION_SIZE; ++i)
-        if (G_BEST[CHROMOSOME_SIZE_INTE_GA - 1] > POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1])
-            memcpy(G_BEST, POPULATION[i], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+    for (i = 1; i < POP_SIZE; ++i) {
+        if (G_BEST[number]) {
+            if (POPULATION[i][number] < G_BEST[number])
+                memcpy(G_BEST, POPULATION[i], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            else {
+                if ((POPULATION[i][number] == G_BEST[number]) && (POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1]))
+                    memcpy(G_BEST, POPULATION[i], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            }
+        }
+        else {
+            if (!POPULATION[i][number] && (POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1]))
+                memcpy(G_BEST, POPULATION[i], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+        }
+    }
+    /*
+    // Allocate memory for OT scheduling data
+    ot_data_arr = (OTs**)calloc(num_ots, sizeof(OTs*));
+    ot_days_data_arr = (OTs***)calloc(days, sizeof(OTs**));
+    
+    if (!ot_data_arr || !ot_days_data_arr) {
+        fprintf(stderr, "Memory allocation failed.\n");
+        if (ot_data_arr) free(ot_data_arr);
+        if (ot_days_data_arr) {
+            for (i = 0; i < days; ++i) {
+                if (ot_days_data_arr[i]) free(ot_days_data_arr[i]);
+            }
+            free(ot_days_data_arr);
+        }
+        exit(EXIT_FAILURE);
+    }
 
-    for (CURR_ITER = 0; CURR_ITER < NUM_ITER; ++CURR_ITER) {
+    for (i = 0; i < num_ots; ++i) ot_data_arr[i] = ot + i;
+
+    for (i = 0; i < days; ++i) {
+        ot_days_data_arr[i] = (OTs**)calloc(num_ots, sizeof(OTs*));
+        if (!ot_days_data_arr[i]) {
+            fprintf(stderr, "Memory allocation failed for ot_days_data_arr[%d].\n", i);
+            // Cleanup already allocated memory
+            free(ot_data_arr);
+            for (j = 0; j < i; ++j) {
+                if (ot_days_data_arr[j]) free(ot_days_data_arr[j]);
+            }
+            free(ot_days_data_arr);
+            exit(EXIT_FAILURE);
+        }
+
+        for (j = 0; j < num_ots; ++j) {
+            ot_days_data_arr[i][j] = ot_data_arr[j];
+        }
+        sort_ot_data_arr(ot_days_data_arr[i], i);
+    }
+    */
+
+    // ---------------------------------------------------------------START GENETIC ALGORITHM-------------------------------------------------------------
+    if (type == 'm') gen = N_GEN_MANDATORY;
+    else gen = N_GEN;
+    for (CURR_ITER = 0; CURR_ITER < gen; ++CURR_ITER) {
+        if (type == 'p') p_c = 0.2;
         if ((rand() / (float)RAND_MAX) < p_c) {
             crossoverTournamentSelectionInteGA();
-            orderCrossoverInteGA();
+            // printf("\nCrossover t - selection successful!");
+            orderCrossoverInteGA(type);
+            // printf("\nCrossover operation successful!");
 
             for (j = 0; j < 2; ++j) {
-                evaluateViolationsAndCost(CROSSOVER_OFFSPRING_STORAGE_PLACE[j]);
+                evaluateViolationsAndCost(CROSSOVER_OFFSPRING_STORAGE_PLACE[j], type);
+                // printf("\nCrossover cost & violation evaluation successful!");
                 max_violations = 0;
                 max_cost = 0;
-                for (i = 0; i < POPULATION_SIZE; ++i) {
-                    if (POPULATION[i][num_patients] > max_violations) max_violations = POPULATION[i][num_patients];
-                    if (POPULATION[i][num_patients + 1] > max_cost) max_cost = POPULATION[i][num_patients + 1];
+                for (i = 0; i < POP_SIZE; ++i) {
+                    if (POPULATION[i][number] > max_violations) max_violations = POPULATION[i][number];
+                    if (POPULATION[i][number + 1] > max_cost) max_cost = POPULATION[i][number + 1];
                 }
                 if (max_violations == 0) max_violations = 1;
                 if (max_cost == 0) max_cost = 1;
-                v = (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][num_patients] * THREASHOLD) / max_violations;
-                c = (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][num_patients + 1] * THREASHOLD) / max_cost;
-                v_floor = v;
-                c_floor = c;
-                if ((v_floor + 0.5) < v) v_floor++;
-                if ((c_floor + 0.5) < c) c_floor++;
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[j][num_patients + 2] = v_floor;
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[j][num_patients + 3] = c_floor;
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[j][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(CROSSOVER_OFFSPRING_STORAGE_PLACE[j]);
+                bool has_changed = false;
+                if (max_violations) {
+                    v = (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number] * THREASHOLD) / max_violations;
+                    v_floor = v;
+                    if ((v_floor + 0.5) < v) v_floor++;
+                    printf("\n[cross] v_floor = %d\tv = %f", v_floor, v);
+                    CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number + 2] = v_floor;
+                    has_changed = true;
+                }
+                if (max_cost) {
+                    c = (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number + 1] * THREASHOLD) / max_cost;
+                    c_floor = c;
+                    if ((c_floor + 0.5) < c) c_floor++;
+                    printf("\n[cross] c_floor = %d\tc = %f", c_floor, c);
+                    CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number + 3] = c_floor;
+                    has_changed = true;
+                }
+                if (has_changed)
+                    CROSSOVER_OFFSPRING_STORAGE_PLACE[j][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(CROSSOVER_OFFSPRING_STORAGE_PLACE[j], type);
             }
-            crossoverElitismInteGA();
-            normalize();
-            for (i = 0; i < POPULATION_SIZE; ++i) POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(POPULATION[i]);
-            for (j = 0; j < 2; ++j) {
-                if (G_BEST[CHROMOSOME_SIZE_INTE_GA - 1] > CROSSOVER_OFFSPRING_STORAGE_PLACE[j][CHROMOSOME_SIZE_INTE_GA - 1]) {
-                    memcpy(G_BEST, CROSSOVER_OFFSPRING_STORAGE_PLACE[j], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
-                    last_improvement_iter = CURR_ITER;
+            bool replaced = crossoverElitismInteGA(type);
+            // printf("\nCrossover elitism successful!");
+            if (replaced) {
+                normalize(type);
+                for (i = 0; i < POP_SIZE; ++i) POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(POPULATION[i], type);
+                for (j = 0; j < 2; ++j) {
+                    if (G_BEST[number]) {
+                        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number] < G_BEST[number]) {
+                            memcpy(G_BEST, CROSSOVER_OFFSPRING_STORAGE_PLACE[j], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                            last_improvement_iter = CURR_ITER;
+                        }
+                        else
+                            if ((CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number] == G_BEST[number]) &&
+                                (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1])) {
+                                memcpy(G_BEST, CROSSOVER_OFFSPRING_STORAGE_PLACE[j], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                                last_improvement_iter = CURR_ITER;
+                            }
+                    }
+                    else
+                        if (!CROSSOVER_OFFSPRING_STORAGE_PLACE[j][number] &&
+                            (CROSSOVER_OFFSPRING_STORAGE_PLACE[j][CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1])) {
+                            memcpy(G_BEST, CROSSOVER_OFFSPRING_STORAGE_PLACE[j], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                            last_improvement_iter = CURR_ITER;
+                        }
                 }
             }
         }
         else {
             mutationTournamentSelectionInteGA();
-            swapMutationInteGA();
-            evaluateViolationsAndCost(MUTATED_OFFSPRING_STORAGE_PLACE);
+            // printf("\nMutation t - selection successful!");
+            swapMutationInteGA(type);
+            // printf("\nMutation operation successful!");
+            evaluateViolationsAndCost(MUTATED_OFFSPRING_STORAGE_PLACE, type);
+            // printf("\nMutation cost & violation evaluation successful!");
             max_violations = 0;
             max_cost = 0;
-            for (i = 0; i < POPULATION_SIZE; ++i) {
-                if (POPULATION[i][num_patients] > max_violations) max_violations = POPULATION[i][num_patients];
-                if (POPULATION[i][num_patients + 1] > max_cost) max_cost = POPULATION[i][num_patients + 1];
+            for (i = 0; i < POP_SIZE; ++i) {
+                if (POPULATION[i][number] > max_violations) max_violations = POPULATION[i][number];
+                if (POPULATION[i][number + 1] > max_cost) max_cost = POPULATION[i][number + 1];
             }
             if (max_violations == 0) max_violations = 1;
             if (max_cost == 0) max_cost = 1;
-            v = (MUTATED_OFFSPRING_STORAGE_PLACE[num_patients] * THREASHOLD) / max_violations;
-            c = (MUTATED_OFFSPRING_STORAGE_PLACE[num_patients + 1] * THREASHOLD) / max_cost;
-            v_floor = v;
-            c_floor = c;
-            if ((v_floor + 0.5) < v) v_floor++;
-            if ((c_floor + 0.5) < c) c_floor++;
-            MUTATED_OFFSPRING_STORAGE_PLACE[num_patients + 2] = v_floor;
-            MUTATED_OFFSPRING_STORAGE_PLACE[num_patients + 3] = c_floor;
-            MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(MUTATED_OFFSPRING_STORAGE_PLACE);
-            mutationElitismInteGA();
-            normalize();
-            for (i = 0; i < POPULATION_SIZE; ++i) POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(POPULATION[i]);
-            if (G_BEST[num_patients]) {
-                if (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1]) {
-                    memcpy(G_BEST, MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
-                    last_improvement_iter = CURR_ITER;
+            bool has_changed = false;
+            if (max_violations) {
+                v = (MUTATED_OFFSPRING_STORAGE_PLACE[number] * THREASHOLD) / max_violations;
+                v_floor = v;
+                if ((v_floor + 0.5) < v) v_floor++;
+                printf("\n[mut] v_floor = %d\tv = %f", v_floor, v);
+                MUTATED_OFFSPRING_STORAGE_PLACE[number + 2] = v_floor;
+                has_changed = true;
+            }
+            if (max_cost) {
+                c = (MUTATED_OFFSPRING_STORAGE_PLACE[number + 1] * THREASHOLD) / max_cost;
+                c_floor = c;
+                if ((c_floor + 0.5) < c) c_floor++;
+                printf("\n[mut] c_floor = %d\tc = %f", c_floor, c);
+                MUTATED_OFFSPRING_STORAGE_PLACE[number + 3] = c_floor;
+                has_changed = true;
+            }
+            if (has_changed)
+                MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(MUTATED_OFFSPRING_STORAGE_PLACE, type);
+            bool replaced = mutationElitismInteGA(type);
+            // printf("\nMutation elitism successful!");
+            if (replaced) {
+                normalize(type);
+                for (i = 0; i < POP_SIZE; ++i) POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] = objectiveFunction(POPULATION[i], type);
+                if (G_BEST[number]) {
+                    if (MUTATED_OFFSPRING_STORAGE_PLACE[number] < G_BEST[number]) {
+                        memcpy(G_BEST, MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                        last_improvement_iter = CURR_ITER;
+                    }
+                    else
+                        if ((MUTATED_OFFSPRING_STORAGE_PLACE[number] == G_BEST[number]) &&
+                            (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1])) {
+                            memcpy(G_BEST, MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                            last_improvement_iter = CURR_ITER;
+                        }
                 }
                 else
-                    if (!MUTATED_OFFSPRING_STORAGE_PLACE[num_patients] || MUTATED_OFFSPRING_STORAGE_PLACE[num_patients] < G_BEST[num_patients]) {
+                    if (!MUTATED_OFFSPRING_STORAGE_PLACE[number] &&
+                        (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1])) {
                         memcpy(G_BEST, MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
                         last_improvement_iter = CURR_ITER;
                     }
             }
-            else
-                if (!MUTATED_OFFSPRING_STORAGE_PLACE[num_patients] &&
-                    (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] < G_BEST[CHROMOSOME_SIZE_INTE_GA - 1])) {
-                    memcpy(G_BEST, MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
-                    last_improvement_iter = CURR_ITER;
-                }
         }
     }
 
-    printf("\nViolations in G_BEST: %d", G_BEST[num_patients]);
-    printf("\nCost of G_BEST: %d\n", G_BEST[num_patients + 1]);
-    printf("\nNormalized violations in G_BEST: %d", G_BEST[num_patients + 2]);
-    printf("\nNormalized cost in G_BEST: %d", G_BEST[num_patients + 3]);
+    printf("\ntype: %c", type);
+    printf("\nViolations in G_BEST: %d", G_BEST[number]);
+    printf("\nCost of G_BEST: %d", G_BEST[number + 1]);
+    printf("\nNormalized violations in G_BEST: %d", G_BEST[number + 2]);
+    printf("\nNormalized cost in G_BEST: %d", G_BEST[number + 3]);
     printf("\nG_BEST Fitness: %d", G_BEST[CHROMOSOME_SIZE_INTE_GA - 1]);
+    printf("\n\nPrinting G_BEST at the end of applyGA function: \n");
+    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; ++i) printf("%d ", G_BEST[i]);
 
-    printf("\nNumber of iterations: %d\n", CURR_ITER);
     printf("\nLast improvement from the population: %d", last_improvement);
-    printf("\nLast improvement in the iteration: %d", last_improvement_iter);
+    printf("\nLast improvement in the iteration: %d\n", last_improvement_iter);
 }
 
 // ---------------------------------------------------------------------BELOW: FITNESS FUNCTION---------------------------------------------------------------------
 
-int objectiveFunction(int* chromosome) {
+int objectiveFunction(int* chromosome, char type) {
+    int number;
+    float ALPHA = ((upper_bound - lower_bound) / N_GEN) * CURR_ITER + lower_bound;
+
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: objectiveFunction");
+            exit(EXIT_FAILURE);
+        }
+
     // Objective function: weighted sum of violations and cost
-    float ALPHA = ((upper_bound - lower_bound) / NUM_ITER) * CURR_ITER + lower_bound;
-    return ALPHA * chromosome[num_patients + 2] + (1 - ALPHA) * chromosome[num_patients + 3];
+    return ALPHA * chromosome[number + 2] + (1 - ALPHA) * chromosome[number + 3];
     // chnage - using the normalized values of the violations and cost
 }
 
-void evaluateViolationsAndCost(int* chromosome) {
+void evaluateViolationsAndCost(int* chromosome, char type) {
+    int number, violations;
+
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: evaluateViolationsAndCost");
+            exit(EXIT_FAILURE);
+        }
+
     reset_valuesInteGA();
-    admitPatientsInteGA(&room_gender_map, chromosome);
-    chromosome[num_patients] = nurseAllocationInteGA(); // returns the number of shifts that went without any nurse
-    chromosome[num_patients] += findViolations();
-    chromosome[num_patients + 1] = findCost();
+    violations = admitPatientsInteGA(chromosome, type);
+    if (room_schedule) free_3d_array();
+    if (rooms_requirement) cleanup_rooms_req(num_rooms);
+    create_3d_array(type);
+    create_rooms_req();
+    chromosome[number] = nurseAllocationInteGA(); // returns the number of shifts that went without any nurse
+    chromosome[number] += violations;
+    chromosome[number + 1] = findCost();
+    printf("\n[%c] violations in chromosome: %d", type, chromosome[number]);
 }
 
 int findViolations(void) {
@@ -2417,13 +2701,13 @@ int findViolations(void) {
 int findCost(void) {
     // add validator code here
     int final_cost = 0;
-	final_cost += patient_delay() * weights->patient_delay; // patient delay cost
-	final_cost += elective_unscheduled_patients() * weights->unscheduled_optional; // elective unscheduled patients cost
-	final_cost += open_operating_theatre() * weights->open_operating_theater; // open operating theatre cost
-	final_cost += coc() * weights->continuity_of_care; // cost of cancellation of care
-	final_cost += excessiveNurseLoad() * weights->nurse_excessive_workload; // excessive nurse load cost
-	final_cost += skill_level_mix() * weights->room_nurse_skill; // skill level mix cost
-	final_cost += surgeon_transfer() * weights->surgeon_transfer; // surgeon transfer cost
+    final_cost += patient_delay() * weights->patient_delay; // patient delay cost
+    final_cost += elective_unscheduled_patients() * weights->unscheduled_optional; // elective unscheduled patients cost
+    final_cost += open_operating_theatre() * weights->open_operating_theater; // open operating theatre cost
+    final_cost += coc() * weights->continuity_of_care; // cost of cancellation of care
+    final_cost += excessiveNurseLoad() * weights->nurse_excessive_workload; // excessive nurse load cost
+    final_cost += skill_level_mix() * weights->room_nurse_skill; // skill level mix cost
+    final_cost += surgeon_transfer() * weights->surgeon_transfer; // surgeon transfer cost
     //final_cost += room_age_mix(); // not written correctly
     return final_cost;
 }
@@ -2432,10 +2716,13 @@ int findCost(void) {
 void allocate_surgeon_day_theatre_count() {
     int d = 0, s = 0;
     surgeon_day_theatre_count = (int***)calloc(num_surgeons, sizeof(int**));
+    ASSERT(surgeon_day_theatre_count, "Dynamic Memory Allocation Error!");
     for (s = 0; s < num_surgeons; s++) {
         surgeon_day_theatre_count[s] = (int**)calloc(days, sizeof(int*));
+        ASSERT(surgeon_day_theatre_count[s], "Dynamic Memory Allocation Error!");
         for (d = 0; d < days; d++) {
             surgeon_day_theatre_count[s][d] = (int*)calloc(num_ots, sizeof(int));
+            ASSERT(surgeon_day_theatre_count[s][d], "Dynamic Memory Allocation Error!");
         }
     }
 }
@@ -2606,8 +2893,8 @@ int countdistinctnurses(int p) {
 int countdistinctnurses_occupants(int o) {
     int* tag = (int*)calloc(num_nurses, sizeof(int));
     int i, n, count = 0;
-    for (i = 0; i < occupants[o].num_nurses_alloted; i++) {
-        n = occupants[o].nurses_alloted[i];
+    for (i = 0; i < occupants[o].num_nurses_allotted; i++) {
+        n = occupants[o].nurses_allotted[i];
         if (n != -1 && !tag[n]) {
             tag[n] = 1;
             count++;
@@ -2616,163 +2903,31 @@ int countdistinctnurses_occupants(int o) {
     return count;
 }
 
-// ---------------------------------------------------------------------ABOVE: FITNESS FUNCTION-----------------------------------------------------------------
-
-//------------------------------------------------SORTING USING A SINGLY LINKED LIST BY BUBBLE SORT ALGORITHM----------------------------------------------------
-
-// Function to insert a node at the end
-//void insert_node(Node** head, int fitness, int index) {
-//    Node* new_node = (Node*)calloc(1, sizeof(Node));0
-//    new_node->fitness = fitness;
-//    new_node->chromosome_index = index;
-//    new_node->next = NULL;
-//
-//    if (*head == NULL) *head = new_node;
-//    else {
-//        Node* temp = *head;
-//        while (temp->next) temp = temp->next;
-//        temp->next = new_node;
-//    }
-//}
-//
-//// Function to sort the linked list in ascending order (by fitness)
-//void sort_list(Node** head) {
-//    if (*head == NULL || (*head)->next == NULL) return;
-//
-//    Node* i, * j;
-//    for (i = *head; i->next; i = i->next) {
-//        for (j = i->next; j; j = j->next) {
-//            if (i->fitness > j->fitness) {
-//                // Swap fitness and index
-//                float temp_fitness = i->fitness;
-//                int temp_index = i->chromosome_index;
-//
-//                i->fitness = j->fitness;
-//                i->chromosome_index = j->chromosome_index;
-//
-//                j->fitness = temp_fitness;
-//                j->chromosome_index = temp_index;
-//            }
-//        }
-//    }
-//}
-//
-//// Function to print top N nodes from the sorted list
-//void print_top_n(Node* head, int n) {
-//    Node* temp = head;
-//    for (int i = 0; i < n && temp != NULL; i++, temp = temp->next) printf("Chromosome %d with Fitness: %.2d\n", temp->chromosome_index, temp->fitness);
-//}
-
-//-----------------------------------------------------------------------------------------------------------------------------------------------------
-
-//--------------------------------------------------SORTING USING AN ARRAY BY QUICK SORT ALGORITHM---------------------------------------------------------
-
-// Swap function for indices
-void swap(int* a, int* b) {
-    int temp = *a;
-    *a = *b;
-    *b = temp;
-}
-
-// Partition function for quicksort
-int partition_fitness(int *indices, int low, int high) {
-    int pivot = POPULATION[indices[high]][CHROMOSOME_SIZE_INTE_GA - 1];  // Fitness value
-    int i = low - 1;
-
-    for (int j = low; j < high; j++) {
-        if (POPULATION[indices[j]][CHROMOSOME_SIZE_INTE_GA - 1] < pivot) {
-            i++;
-            swap(indices + i, indices + j);
-        }
-    }
-    swap(indices + i + 1, indices + high);
-    return i + 1;
-}
-
-// Quicksort on indices based on fitness values
-void quicksort_fitness(int *indices, int low, int high) {
-    if (low < high) {
-        int pi = partition_fitness(indices, low, high);
-        quicksort_fitness(indices, low, pi - 1);
-        quicksort_fitness(indices, pi + 1, high);
-    }
-}
-
-//-----------------------------------------------------------------------------------------------------------------------------------------------------
-
+// ---------------------------------------------------------------------ABOVE: FITNESS FUNCTION---------------------------------------------------------------------
 void crossoverTournamentSelectionInteGA(void)
-{   // select 2 parents using Tournament Selection method
-    int i, r11, r12, r13, r21, r22, r23, f11, f12, f13, f21, f22, f23;
-    int fitness, best_fitness, best_fitness_idx1, best_fitness_idx2, max_fitness;
-
-    if (rand() / (float)RAND_MAX < pEXPLOITATION) {
-        int* indices = (int*)calloc(POPULATION_SIZE, sizeof(int));
-        for (i = 0; i < POPULATION_SIZE; i++) indices[i] = i;
-        quicksort_fitness(indices, 0, POPULATION_SIZE - 1);
-        // select the top TOP_P chromosomes of the population
-        /*int* sorted_indices = (int*)calloc(TOP_P, sizeof(int));
-        for (i = 0; i < TOP_P; i++) sorted_indices[i] = indices[i];*/
-
-  //      Node* head = NULL, * temp;
-  //      for (i = 0; i < POPULATION_SIZE; i++) {
-  //          fitness = POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1];
-  //          insert_node(&head, fitness, i);
-  //      }
-		//// first sort the population based on fitness
-		//sort_list(&head);
-		//// select the top TOP_P chromosomes of the population
-  //      int* sorted_indices = (int*)calloc(TOP_P, sizeof(int));
-  //      for (i = 0, temp = head; i < TOP_P; i++, temp = temp->next) sorted_indices[i] = temp->chromosome_index;
-
-
-		// select 3 random indices from the top TOP_P best chromosomes of the population
-        // select the first parent
-        do {
-			r11 = indices[rand() % TOP_P];
-			r12 = indices[rand() % TOP_P];
-			r13 = indices[rand() % TOP_P];
-		} while (r11 == r12 || r12 == r13 || r11 == r13);
-
-        // select the second parent
-        do {
-            r21 = indices[rand() % TOP_P];
-            r22 = indices[rand() % TOP_P];
-            r23 = indices[rand() % TOP_P];
-        } while (r21 == r22 || r22 == r23 || r21 == r23 ||
-            r11 == r21 || r11 == r22 || r11 == r23 ||
-            r12 == r21 || r12 == r22 || r12 == r23 ||
-            r13 == r21 || r13 == r22 || r13 == r23);
-
-	    //free(sorted_indices);
-        free(indices);
-		indices = NULL; // Avoid dangling pointer
-	    // Free memory
-        /*while (head) {
-            temp = head;
-            head = head->next;
-            free(temp);
+{
+    // select 2 parents using Tournament Selection method
+    int r11, r12, r13, r21, r22, r23, f11, f12, f13, f21, f22, f23, i;
+    int best_fitness, best_fitness_idx1, best_fitness_idx2;
+    int actual_chromosome_size = CHROMOSOME_SIZE_INTE_GA - 5; // Exclude last 5 positions
+    // printf("\nActual Chromosome Size: %d\t[printing in crossover t-selection]\n", actual_chromosome_size);
+    
+    /*
+	printf("\nPopulation in Crossover Tournament Selection:\n");
+    for (i = 0; i < POP_SIZE; i++) {
+        for (int j = 0; j < CHROMOSOME_SIZE_INTE_GA; j++) {
+            printf("%d ", POPULATION[i][j]);
         }
-        head = NULL;
-        temp = NULL;*/
-    }
-    else {
-        // select first parent
-        do {
-            r11 = rand() % (POPULATION_SIZE);
-            r12 = rand() % (POPULATION_SIZE);
-            r13 = rand() % (POPULATION_SIZE);
-        } while (r11 == r12 || r12 == r13 || r11 == r13);
+        printf("\n");
+	}
+    */
 
-        // select second parent
-        do {
-            r21 = rand() % (POPULATION_SIZE);
-            r22 = rand() % (POPULATION_SIZE);
-            r23 = rand() % (POPULATION_SIZE);
-        } while (r21 == r22 || r22 == r23 || r21 == r23 ||
-            r11 == r21 || r11 == r22 || r11 == r23 ||
-            r12 == r21 || r12 == r22 || r12 == r23 ||
-            r13 == r21 || r13 == r22 || r13 == r23);
-    }
+    // select first parent
+    do {
+        r11 = rand() % (POP_SIZE);
+        r12 = rand() % (POP_SIZE);
+        r13 = rand() % (POP_SIZE);
+    } while (r11 == r12 || r12 == r13 || r11 == r13);
 
     // select the chromosome1 with the best fitness
     f11 = POPULATION[r11][CHROMOSOME_SIZE_INTE_GA - 1];
@@ -2791,11 +2946,22 @@ void crossoverTournamentSelectionInteGA(void)
             best_fitness_idx1 = r12;
         }
     }
-    else
+    else {
         if (f13 < best_fitness) {
             best_fitness = f13;
             best_fitness_idx1 = r13;
         }
+    }
+
+    // select second parent
+    do {
+        r21 = rand() % (POP_SIZE);
+        r22 = rand() % (POP_SIZE);
+        r23 = rand() % (POP_SIZE);
+    } while (r21 == r22 || r22 == r23 || r21 == r23 ||
+        r11 == r21 || r11 == r22 || r11 == r23 ||
+        r12 == r21 || r12 == r22 || r12 == r23 ||
+        r13 == r21 || r13 == r22 || r13 == r23);
 
     // select the chromosome2 with the best fitness
     f21 = POPULATION[r21][CHROMOSOME_SIZE_INTE_GA - 1];
@@ -2814,66 +2980,187 @@ void crossoverTournamentSelectionInteGA(void)
             best_fitness_idx2 = r22;
         }
     }
-    else
+    else {
         if (f23 < best_fitness) {
             best_fitness = f23;
             best_fitness_idx2 = r23;
         }
+    }
 
+    // CRITICAL FIX: Validate and clean the genetic portion before copying
+    for (i = 0; i < actual_chromosome_size; i++) {
+        int gene1 = POPULATION[best_fitness_idx1][i];
+        int gene2 = POPULATION[best_fitness_idx2][i];
+
+        // Validate and fix invalid genes in parent 1
+        if (gene1 < 0 || gene1 >= num_patients) {
+            printf("Warning: Invalid gene1 value %d at position %d in parent selection. Replacing with valid value.\n", gene1, i);
+            // Replace with a valid patient ID (you might want to use a more sophisticated replacement strategy)
+            gene1 = i % num_patients;
+        }
+
+        // Validate and fix invalid genes in parent 2
+        if (gene2 < 0 || gene2 >= num_patients) {
+            printf("Warning: Invalid gene2 value %d at position %d in parent selection. Replacing with valid value.\n", gene2, i);
+            // Replace with a valid patient ID
+            gene2 = i % num_patients;
+        }
+
+        CROSSOVER_PARENT_STORAGE_PLACE[0][i] = gene1;
+        CROSSOVER_PARENT_STORAGE_PLACE[1][i] = gene2;
+    }
+
+    // Copy the objective/fitness values as-is (they won't be used in crossover gene operations)
+    for (i = actual_chromosome_size; i < CHROMOSOME_SIZE_INTE_GA; i++) {
+        CROSSOVER_PARENT_STORAGE_PLACE[0][i] = POPULATION[best_fitness_idx1][i];
+        CROSSOVER_PARENT_STORAGE_PLACE[1][i] = POPULATION[best_fitness_idx2][i];
+    }
+
+    /*
+	printf("\nSelected Parents (after validation) in Crossover Tournament Selection:\n");
+    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; i++) {
+        printf("\n%d ", CROSSOVER_PARENT_STORAGE_PLACE[0][i]);
+		printf("%d ", CROSSOVER_PARENT_STORAGE_PLACE[1][i]);
+	}
+    */
+}
+
+// Alternative function if you want to ensure chromosome integrity from the start
+void validateAndFixChromosome(int* chromosome, int chromosome_length) {
+    int actual_genes = chromosome_length - 5;
+    bool* used = (bool*)calloc(num_patients, sizeof(bool));
+
+    if (!used) {
+        printf("Memory allocation failed in validateAndFixChromosome!\n");
+        return;
+    }
+
+    // First pass: mark valid genes as used
+    for (int i = 0; i < actual_genes; i++) {
+        if (chromosome[i] >= 0 && chromosome[i] < num_patients) {
+            used[chromosome[i]] = true;
+        }
+    }
+
+    // Second pass: fix invalid genes
+    int next_available = 0;
+    for (int i = 0; i < actual_genes; i++) {
+        if (chromosome[i] < 0 || chromosome[i] >= num_patients ||
+            (i > 0 && used[chromosome[i]])) { // Also handle duplicates
+
+            // Find next available gene
+            while (next_available < num_patients && used[next_available]) {
+                next_available++;
+            }
+
+            if (next_available < num_patients) {
+                printf("Fixing invalid/duplicate gene at position %d: %d -> %d\n",
+                    i, chromosome[i], next_available);
+                chromosome[i] = next_available;
+                used[next_available] = true;
+            }
+            else {
+                // Fallback: use modulo if we run out of available genes
+                chromosome[i] = i % num_patients;
+            }
+        }
+    }
+
+    free(used);
+}
+
+// Enhanced tournament selection with chromosome validation
+void crossoverTournamentSelectionInteGAWithValidation(void)
+{
+    // select 2 parents using Tournament Selection method
+    int r11, r12, r13, r21, r22, r23, f11, f12, f13, f21, f22, f23;
+    int best_fitness, best_fitness_idx1, best_fitness_idx2;
+
+    // select first parent
+    do {
+        r11 = rand() % (POP_SIZE);
+        r12 = rand() % (POP_SIZE);
+        r13 = rand() % (POP_SIZE);
+    } while (r11 == r12 || r12 == r13 || r11 == r13);
+
+    // select the chromosome1 with the best fitness
+    f11 = POPULATION[r11][CHROMOSOME_SIZE_INTE_GA - 1];
+    f12 = POPULATION[r12][CHROMOSOME_SIZE_INTE_GA - 1];
+    f13 = POPULATION[r13][CHROMOSOME_SIZE_INTE_GA - 1];
+    best_fitness = f11;
+    best_fitness_idx1 = r11;
+
+    if (f12 < best_fitness) {
+        if (f13 < f12) {
+            best_fitness = f13;
+            best_fitness_idx1 = r13;
+        }
+        else {
+            best_fitness = f12;
+            best_fitness_idx1 = r12;
+        }
+    }
+    else {
+        if (f13 < best_fitness) {
+            best_fitness = f13;
+            best_fitness_idx1 = r13;
+        }
+    }
+
+    // select second parent
+    do {
+        r21 = rand() % (POP_SIZE);
+        r22 = rand() % (POP_SIZE);
+        r23 = rand() % (POP_SIZE);
+    } while (r21 == r22 || r22 == r23 || r21 == r23 ||
+        r11 == r21 || r11 == r22 || r11 == r23 ||
+        r12 == r21 || r12 == r22 || r12 == r23 ||
+        r13 == r21 || r13 == r22 || r13 == r23);
+
+    // select the chromosome2 with the best fitness
+    f21 = POPULATION[r21][CHROMOSOME_SIZE_INTE_GA - 1];
+    f22 = POPULATION[r22][CHROMOSOME_SIZE_INTE_GA - 1];
+    f23 = POPULATION[r23][CHROMOSOME_SIZE_INTE_GA - 1];
+    best_fitness = f21;
+    best_fitness_idx2 = r21;
+
+    if (f22 < best_fitness) {
+        if (f23 < f22) {
+            best_fitness = f23;
+            best_fitness_idx2 = r23;
+        }
+        else {
+            best_fitness = f22;
+            best_fitness_idx2 = r22;
+        }
+    }
+    else {
+        if (f23 < best_fitness) {
+            best_fitness = f23;
+            best_fitness_idx2 = r23;
+        }
+    }
+
+    // Copy selected parents
     memcpy(CROSSOVER_PARENT_STORAGE_PLACE[0], POPULATION[best_fitness_idx1], (CHROMOSOME_SIZE_INTE_GA) * sizeof(int));
     memcpy(CROSSOVER_PARENT_STORAGE_PLACE[1], POPULATION[best_fitness_idx2], (CHROMOSOME_SIZE_INTE_GA) * sizeof(int));
+
+    // Validate and fix the chromosomes before crossover
+    validateAndFixChromosome(CROSSOVER_PARENT_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA);
+    validateAndFixChromosome(CROSSOVER_PARENT_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA);
 }
 
 void mutationTournamentSelectionInteGA(void)
 {   // select 2 parents using Tournament Selection method
-    int i, r1, r2, r3, f1, f2, f3;
-    int best_fitness, best_fitness_idx, fitness;
+    int r1, r2, r3, f1, f2, f3;
+    int best_fitness, best_fitness_idx;
 
-    if (rand() / (float)RAND_MAX < pEXPLOITATION) {
-        int* indices = (int*)calloc(POPULATION_SIZE, sizeof(int));
-        for (i = 0; i < POPULATION_SIZE; i++) indices[i] = i;
-        quicksort_fitness(indices, 0, POPULATION_SIZE - 1);
-        // select the top TOP_P chromosomes of the population
-        /*int* sorted_indices = (int*)calloc(TOP_P, sizeof(int));
-        for (i = 0; i < TOP_P; i++) sorted_indices[i] = indices[i];*/
-
-        //Node* head = NULL, * temp;
-        //for (i = 0; i < POPULATION_SIZE; i++) {
-        //    fitness = POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1];
-        //    insert_node(&head, fitness, i);
-        //}
-        //// first sort the population based on fitness
-        //sort_list(&head);
-        //// select the top pTOP_P% of the population
-        //int* sorted_indices = (int*)calloc(TOP_P, sizeof(int));
-        //for (i = 0, temp = head; i < TOP_P; i++, temp = temp->next) sorted_indices[i] = temp->chromosome_index;
-        //// select 3 random indices from the top TOP_P best chromosomes of the population
-        do {
-            r1 = indices[rand() % TOP_P];
-            r2 = indices[rand() % TOP_P];
-            r3 = indices[rand() % TOP_P];
-        } while (r1 == r2 || r2 == r3 || r1 == r3);
-
-        //free(sorted_indices);
-        free(indices);
-		indices = NULL; // Avoid dangling pointer
-        // Free memory
-        /*while (head) {
-            temp = head;
-            head = head->next;
-            free(temp);
-        }
-        head = NULL;
-        temp = NULL;*/
-    }
-    else {
-        // select first parent
-        do {
-            r1 = rand() % (POPULATION_SIZE);
-            r2 = rand() % (POPULATION_SIZE);
-            r3 = rand() % (POPULATION_SIZE);
-        } while (r1 == r2 || r2 == r3 || r1 == r3);
-    }
+    // select first parent
+    do {
+        r1 = rand() % (POP_SIZE);
+        r2 = rand() % (POP_SIZE);
+        r3 = rand() % (POP_SIZE);
+    } while (r1 == r2 || r2 == r3 || r1 == r3);
 
     // select a chromosome with the best fitness
     f1 = POPULATION[r1][CHROMOSOME_SIZE_INTE_GA - 1];
@@ -2901,15 +3188,24 @@ void mutationTournamentSelectionInteGA(void)
     memcpy(MUTATE_PARENT_STORAGE_PLACE, POPULATION[best_fitness_idx], (CHROMOSOME_SIZE_INTE_GA) * sizeof(int));
 }
 
-void crossoverElitismInteGA(void)
+bool crossoverElitismInteGA(char type)
 {
-    int i, worst_fitness_chromosome_index = 0, second_worst_fitness_chromosome_index = 0;
+    int i, worst_fitness_chromosome_index = 0, second_worst_fitness_chromosome_index = 0, number;
+    bool replaced = false;
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: crossoverElitismInteGA");
+            exit(EXIT_FAILURE);
+        }
 
-    for (i = 1; i < POPULATION_SIZE; ++i)
+    for (i = 1; i < POP_SIZE; ++i)
         if (POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] > POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
             worst_fitness_chromosome_index = i;
 
-    for (i = 1; i < POPULATION_SIZE; ++i)
+    for (i = 1; i < POP_SIZE; ++i)
         if (POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] > POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1] &&
             i != worst_fitness_chromosome_index)
             second_worst_fitness_chromosome_index = i;
@@ -2917,96 +3213,272 @@ void crossoverElitismInteGA(void)
     // With the worst chromosome
 
     // offspring 0 with the worst chromosome
-    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][num_patients]) {
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][number]) {
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
         else
-            if (!POPULATION[worst_fitness_chromosome_index][num_patients] ||
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[0][num_patients] < POPULATION[worst_fitness_chromosome_index][num_patients])
+            if (!POPULATION[worst_fitness_chromosome_index][number] ||
+                CROSSOVER_OFFSPRING_STORAGE_PLACE[0][number] < POPULATION[worst_fitness_chromosome_index][number]) {
                 memcpy(POPULATION[worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                replaced = true;
+            }
     }
     else
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
 
     // offspring 1 with the worst chromosome
-    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][num_patients]) {
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][number]) {
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
         else
-            if (!POPULATION[worst_fitness_chromosome_index][num_patients] ||
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[1][num_patients] < POPULATION[worst_fitness_chromosome_index][num_patients])
+            if (!POPULATION[worst_fitness_chromosome_index][number] ||
+                CROSSOVER_OFFSPRING_STORAGE_PLACE[1][number] < POPULATION[worst_fitness_chromosome_index][number]) {
                 memcpy(POPULATION[worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                replaced = true;
+            }
     }
     else
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
-
+            replaced = true;
+        }
     // With second worst chromosome
 
     // offspring 0 with the second worst chromosome
-    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][num_patients]) {
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][number]) {
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[second_worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
         else
-            if (!POPULATION[second_worst_fitness_chromosome_index][num_patients] ||
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[0][num_patients] < POPULATION[second_worst_fitness_chromosome_index][num_patients])
+            if (!POPULATION[second_worst_fitness_chromosome_index][number] ||
+                CROSSOVER_OFFSPRING_STORAGE_PLACE[0][number] < POPULATION[second_worst_fitness_chromosome_index][number]) {
                 memcpy(POPULATION[second_worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                replaced = true;
+            }
     }
     else
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[0][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[second_worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[0], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
 
     // offspring 1 with the second worst chromosome
-    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][num_patients]) {
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+    if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][number]) {
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[second_worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
         else
-            if (!POPULATION[second_worst_fitness_chromosome_index][num_patients] ||
-                CROSSOVER_OFFSPRING_STORAGE_PLACE[1][num_patients] < POPULATION[second_worst_fitness_chromosome_index][num_patients])
+            if (!POPULATION[second_worst_fitness_chromosome_index][number] ||
+                CROSSOVER_OFFSPRING_STORAGE_PLACE[1][number] < POPULATION[second_worst_fitness_chromosome_index][number]) {
                 memcpy(POPULATION[second_worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                replaced = true;
+            }
     }
     else
-        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+        if (CROSSOVER_OFFSPRING_STORAGE_PLACE[1][CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[second_worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[second_worst_fitness_chromosome_index], CROSSOVER_OFFSPRING_STORAGE_PLACE[1], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
+    return replaced;
 }
 
-void mutationElitismInteGA(void)
+bool mutationElitismInteGA(char type)
 {
-    int i, worst_fitness_chromosome_index = 0;
+    int i, worst_fitness_chromosome_index = 0, number;
+    bool replaced = false;
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: mutationElitismInteGA");
+            exit(EXIT_FAILURE);
+        }
 
-    for (i = 1; i < POPULATION_SIZE; ++i)
+    for (i = 1; i < POP_SIZE; ++i)
         if (POPULATION[i][CHROMOSOME_SIZE_INTE_GA - 1] > POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
             worst_fitness_chromosome_index = i;
 
-    if (MUTATED_OFFSPRING_STORAGE_PLACE[num_patients]) {
-        if (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+    if (MUTATED_OFFSPRING_STORAGE_PLACE[number]) {
+        if (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[worst_fitness_chromosome_index], MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
         else
-            if (!POPULATION[worst_fitness_chromosome_index][num_patients] ||
-                MUTATED_OFFSPRING_STORAGE_PLACE[num_patients] < POPULATION[worst_fitness_chromosome_index][num_patients])
+            if (!POPULATION[worst_fitness_chromosome_index][number] ||
+                MUTATED_OFFSPRING_STORAGE_PLACE[number] < POPULATION[worst_fitness_chromosome_index][number]) {
                 memcpy(POPULATION[worst_fitness_chromosome_index], MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+                replaced = true;
+            }
     }
     else
-        if (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] <
-            POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1])
+        if (MUTATED_OFFSPRING_STORAGE_PLACE[CHROMOSOME_SIZE_INTE_GA - 1] < POPULATION[worst_fitness_chromosome_index][CHROMOSOME_SIZE_INTE_GA - 1]) {
             memcpy(POPULATION[worst_fitness_chromosome_index], MUTATED_OFFSPRING_STORAGE_PLACE, CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+            replaced = true;
+        }
+
+    return replaced;
+}
+
+//---------------------------------------------------------ABOVE: GENETIC ALGORITHM-------------------------------------------------------------
+
+/*.........................
+1. room_requ - #rooms X #shifts
+2. room_schedule - #room X #days X #patient (in that room + on that day)
+3. dm_nurse_availibility - #shifts X #nurses (matrix of struct pointers)
+.........................*/
+
+int nurseAllocationInteGA(void)
+{
+    int r_id, r_index, fitness = 0, p_index, sh, s, rand_nurse, unattended_shifts = 0, j, iter, most_suitable_shift;
+    Nurses* nurse = NULL;
+    int* new_rooms = NULL, day, temp, i, * new_nurses_p = NULL, * new_nurses = NULL, * new_nurses_occ = NULL;
+    bool flag = false;
+    int** track_room_shift = (int**)calloc(num_rooms, sizeof(int*));
+    if (!track_room_shift) {
+        perror("Memory allocation failed");
+        exit(EXIT_FAILURE);
+    }
+    for (i = 0; i < num_rooms; i++) {
+        track_room_shift[i] = (int*)calloc(days * 3, sizeof(int));
+        if (!track_room_shift[i]) {
+            perror("Memory allocation failed");
+            exit(EXIT_FAILURE);
+        }
+        for (j = 0; j < days * 3; ++j) track_room_shift[i][j] = -1;
+    }
+
+    for (r_index = 0; r_index < num_rooms; ++r_index) {
+        r_id = room[r_index].id;
+        for (sh = 0; sh < days * 3; ++sh) {
+            if (room[r_index].num_patients_info[sh / 3] == 0) continue; // no requirement for this shift
+            if (track_room_shift[r_index][sh] != -1) continue;
+            iter = 0;
+            most_suitable_shift = -1;
+            // first checking the room if any nurse is available - increasing continuity of care
+            if (room[r_index].length_of_nurses_allotted) {
+                do {
+                    if (++iter > (num_nurses * 2)) break; // running this randomization for num_nurses*2 times
+                    rand_nurse = rand() % (room[r_index].length_of_nurses_allotted);
+                    nurse = &nurses[room[r_index].nurses_allotted[rand_nurse]];
+                    if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
+                    for (s = 0; s < nurse->num_shifts; ++s) {
+                        if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
+                        if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
+                        most_suitable_shift = s;
+                        break;
+                    }
+                } while (most_suitable_shift == -1);
+            }
+
+            // checking in the shift sh for nurses in case there's no suitable nurse already assigned to that room
+            if (most_suitable_shift == -1) {
+                iter = 0;
+                do {
+                    if (++iter > num_nurses * 2) break; // running this randomization for num_nurses*2 times
+                    rand_nurse = rand() % (current_size_dm_nurse[sh]);
+                    nurse = dm_nurses_availability[sh][rand_nurse];
+                    if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
+                    for (s = 0; s < nurse->num_shifts; ++s) {
+                        if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
+                        if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
+                        most_suitable_shift = s;
+                        break;
+                    }
+                } while (most_suitable_shift == -1);
+            }
+            if (most_suitable_shift == -1) { ++unattended_shifts; continue; }
+
+            track_room_shift[r_index][sh] = nurse->id;
+            // Allocate room to nurse's shift
+            if (!nurse->shift[most_suitable_shift].num_rooms) new_rooms = calloc(1, sizeof(int));
+            else new_rooms = realloc(nurse->shift[most_suitable_shift].rooms, (nurse->shift[most_suitable_shift].num_rooms + 1) * sizeof(int));
+            if (!new_rooms) ASSERT(0, "Memory Allocation Error!");
+            nurse->shift[most_suitable_shift].rooms = new_rooms;
+            nurse->shift[most_suitable_shift].rooms[nurse->shift[most_suitable_shift].num_rooms++] = r_id;
+            nurse->shift[most_suitable_shift].load_left -= rooms_requirement[r_index][sh].load_sum;
+            if (nurse->shift[most_suitable_shift].load_left < 0) nurse->shift[most_suitable_shift].load_left = 0;
+
+            // Allocate nurse to room
+            if (!room[r_index].length_of_nurses_allotted) new_nurses = calloc(1, sizeof(int));
+            else new_nurses = realloc(room[r_index].nurses_allotted, (room[r_index].length_of_nurses_allotted + 1) * sizeof(int));
+            if (!new_nurses) ASSERT(0, "Memory Allocation Error!");
+            room[r_index].nurses_allotted = new_nurses;
+            room[r_index].nurses_allotted[room[r_index].length_of_nurses_allotted++] = nurse->id;
+
+            // Update patients and occupants
+            day = sh / 3;
+            for (p_index = 0; p_index < size_of_room_schedule[r_index][day]; ++p_index) {
+                char* entry = room_schedule[r_index][day][p_index];
+                if (*entry == 'p') {
+                    int id = str2int(entry);
+                    if (!patients[id].num_nurses_allotted) new_nurses_p = calloc(1, sizeof(int));
+                    else new_nurses_p = realloc(patients[id].nurses_allotted, (patients[id].num_nurses_allotted + 1) * sizeof(int));
+                    if (!new_nurses_p) ASSERT(0, "Memory Allocation Error!");
+                    patients[id].nurses_allotted = new_nurses_p;
+                    patients[id].nurses_allotted[patients[id].num_nurses_allotted++] = nurse->id;
+                }
+                else if (*entry == 'a') {
+                    int occ = str2int(entry);
+                    if (!occupants[occ].num_nurses_allotted) new_nurses_occ = calloc(1, sizeof(int));
+                    else new_nurses_occ = realloc(occupants[occ].nurses_allotted, (occupants[occ].num_nurses_allotted + 1) * sizeof(int));
+                    if (!new_nurses_occ) ASSERT(0, "Memory Allocation Error!");
+                    occupants[occ].nurses_allotted = new_nurses_occ;
+                    occupants[occ].nurses_allotted[occupants[occ].num_nurses_allotted++] = nurse->id;
+                }
+            }
+        }
+    }
+
+    temp = unattended_shifts;
+    for (i = 0, unattended_shifts = 0; i < num_rooms; ++i) for (j = 0; j < days * 3; ++j)
+        if (track_room_shift[i][j] == -1 && room[i].num_patients_info[j / 3]) unattended_shifts++;
+    if (temp != unattended_shifts) ASSERT(0, "Kuch gadbad hai re baaba - in calculation of unattended_shifts");
+    for (int i = 0; i < num_rooms; i++) free(track_room_shift[i]);
+    free(track_room_shift);
+    track_room_shift = NULL; // Avoid dangling pointer
+    return unattended_shifts;
+}
+
+void generateNewChromosomeInteGA(int chromo_num)
+{
+    int j, r1, r2;
+
+    // copy all the genes from (chrmo_num-1)th chrmosome to (chromo_num)th chromosome
+    for (j = 0; j < CHROMOSOME_SIZE_INTE_GA; ++j) POPULATION[chromo_num][j] = POPULATION[chromo_num - 1][j];
+
+    for (j = 0; j < CHROMOSOME_SIZE_INTE_GA; ++j) {
+        do {
+            if (!mandatory_count) {
+				printf("\nMandatory count is 0. Cannot perform mutation.");
+				exit(EXIT_FAILURE);
+            }
+            r1 = rand() % mandatory_count;
+            r2 = rand() % mandatory_count;
+        } while (r1 == r2);
+
+        POPULATION[chromo_num][r1] += POPULATION[chromo_num][r2];
+        POPULATION[chromo_num][r2] = POPULATION[chromo_num][r1] - POPULATION[chromo_num][r2];
+        POPULATION[chromo_num][r1] -= POPULATION[chromo_num][r2];
+    }
 }
 
 void generatePopulationInteGA(void)
 {
-    int i, j;
-    for (j = 0; j < num_patients; ++j) POPULATION[0][j] = patients[j].id;
-    for (i = 1; i < POPULATION_SIZE; ++i) generateNewChromosomeInteGA(i);
+    int i, count;
+    for (i = 0, count = 0; i < num_patients; ++i) if (patients[i].mandatory) POPULATION[0][count++] = patients[i].id;
+    printf("\nNumber of mandatory patients (printing in generatePopulationInteGA() function) is: %d", count);
+    for (i = 0; i < 5; ++i) POPULATION[0][mandatory_count + i] = -1;
+    for (i = 1; i < POP_SIZE; ++i) generateNewChromosomeInteGA(i);
 }
 
 void initDataStructuresInteGA(void)
@@ -3038,13 +3510,13 @@ void initDataStructuresInteGA(void)
         ASSERT(CROSSOVER_PARENT_STORAGE_PLACE[i], "Dynamic Memory Allocation Error for CROSSOVER_PARENT_STORAGE_PLACE[i]");
     }
 
-    POPULATION = (int**)calloc(POPULATION_SIZE, sizeof(int*));
+    POPULATION = (int**)calloc(POP_SIZE, sizeof(int*));
     ASSERT(POPULATION, "Dynamic Memory Allocation Error for POPULATION");
 
-    for (i = 0; i < POPULATION_SIZE; ++i) {
+    for (i = 0; i < POP_SIZE; ++i) {
         POPULATION[i] = (int*)calloc(size, sizeof(int));
         ASSERT(POPULATION[i], "Dynamic Memory Allocation Error for a CHROMOSOME");
-        for (j = 0; j < 5; ++j) POPULATION[i][num_patients + j] = -1;
+        for (j = 0; j < 5; ++j) POPULATION[i][mandatory_count + j] = -1;
     }
 }
 
@@ -3052,203 +3524,448 @@ void freeDataStructuresInteGA(void)
 {
     int i;
     free(MUTATED_OFFSPRING_STORAGE_PLACE);
-	free(MUTATE_PARENT_STORAGE_PLACE);
-	MUTATED_OFFSPRING_STORAGE_PLACE = NULL; // Avoid dangling pointer
+    free(MUTATE_PARENT_STORAGE_PLACE);
+    MUTATED_OFFSPRING_STORAGE_PLACE = NULL; // Avoid dangling pointer
     MUTATE_PARENT_STORAGE_PLACE = NULL; // Avoid dangling pointer
 
     for (i = 0; i < 2; ++i) if (CROSSOVER_OFFSPRING_STORAGE_PLACE[i]) free(CROSSOVER_OFFSPRING_STORAGE_PLACE[i]);
     free(CROSSOVER_OFFSPRING_STORAGE_PLACE);
-	CROSSOVER_OFFSPRING_STORAGE_PLACE = NULL; // Avoid dangling pointer
+    CROSSOVER_OFFSPRING_STORAGE_PLACE = NULL; // Avoid dangling pointer
 
     for (i = 0; i < 2; ++i) if (CROSSOVER_PARENT_STORAGE_PLACE[i]) free(CROSSOVER_PARENT_STORAGE_PLACE[i]);
     free(CROSSOVER_PARENT_STORAGE_PLACE);
-	CROSSOVER_PARENT_STORAGE_PLACE = NULL; // Avoid dangling pointer
+    CROSSOVER_PARENT_STORAGE_PLACE = NULL; // Avoid dangling pointer
 
-    for (i = 0; i < POPULATION_SIZE; ++i) if (POPULATION[i]) free(POPULATION[i]);
+    for (i = 0; i < POP_SIZE; ++i) if (POPULATION[i]) free(POPULATION[i]);
     free(POPULATION);
-	POPULATION = NULL; // Avoid dangling pointer
+    POPULATION = NULL; // Avoid dangling pointer
 
     if (G_BEST) free(G_BEST);
-	G_BEST = NULL; // Avoid dangling pointer
+    G_BEST = NULL; // Avoid dangling pointer
 }
 
-//---------------------------------------------------------ABOVE: GENETIC ALGORITHM-------------------------------------------------------------
+static void resizeDataStructures(void) {
+    int size = CHROMOSOME_SIZE_INTE_GA, i;
+    /*
+    * Resize all the Data Structures: 
+    * All 3 Nurse Allocation DS
+    * All the Storage DS - like MUTATED_OFFSPRING_STORAGE_PLACE, CROSSOVER_OFFSPRING_STORAGE_PLACE, etc.
+    */
+    MUTATED_OFFSPRING_STORAGE_PLACE = (int*)realloc(MUTATED_OFFSPRING_STORAGE_PLACE, size * sizeof(int));
+    ASSERT(MUTATED_OFFSPRING_STORAGE_PLACE, "Dynamic Memory Allocation Error for MUTATED_OFFSPRING_STORAGE_PLACE");
+    
+    MUTATE_PARENT_STORAGE_PLACE = (int*)realloc(MUTATE_PARENT_STORAGE_PLACE, size * sizeof(int));
+    ASSERT(MUTATE_PARENT_STORAGE_PLACE, "Dynamic Memory Allocation Error for MUTATE_PARENT_STORAGE_PLACE");
+    
+    G_BEST = (int*)realloc(G_BEST, size * sizeof(int));
+    ASSERT(G_BEST, "Dynamic Memory Allocation Error for G_BEST");
 
-/*.........................
-1. room_requ - #rooms X #shifts
-2. room_schedule - #room X #days X #patient (in that room + on that day)
-3. dm_nurse_availibility - #shifts X #nurses (matrix of struct pointers)
-.........................*/
-
-int nurseAllocationInteGA(void)
-{
-    int n_id, r_id, r_index, fitness = 0, nurse_shift, n_index, p_index, sh, s, rand_nurse, unattended_shifts = 0, j, iter, most_suitable_shift;
-    Nurses* nurse = NULL;
-    int* new_rooms, day, temp, i, * new_nurses_p, * new_nurses, * new_nurses_occ;
-    bool flag;
-    int** track_room_shift = (int**)calloc(num_rooms, sizeof(int*));
-    for (int i = 0; i < num_rooms; i++) {
-        track_room_shift[i] = (int*)calloc(days * 3, sizeof(int));
-        if (!track_room_shift[i]) {
-            perror("Memory allocation failed");
-            exit(EXIT_FAILURE);
-        }
-        for (j = 0; j < days * 3; ++j) track_room_shift[i][j] = -1;
+    for (i = 0; i < 2; ++i) {
+        CROSSOVER_OFFSPRING_STORAGE_PLACE[i] = (int*)realloc(CROSSOVER_OFFSPRING_STORAGE_PLACE[i], size * sizeof(int));
+        ASSERT(CROSSOVER_OFFSPRING_STORAGE_PLACE[i], "Dynamic Memory Allocation Error for CROSSOVER_OFFSPRING_STORAGE_PLACE[i]");
     }
 
-    for (r_index = 0; r_index < num_rooms; ++r_index) {
-        r_id = room[r_index].id;
-        for (sh = 0; sh < days * 3; ++sh) {
-            if (room[r_index].num_patients_info[sh / 3] == 0) continue; // no requirement for this shift
-            if (track_room_shift[r_index][sh] != -1) continue;
-            iter = 0;
-            most_suitable_shift = -1;
-            // first checking the room if any nurse is available - increasing continuity of care
-            if (room[r_index].length_of_nurses_alloted) {
-                do {
-                    rand_nurse = rand() % (room[r_index].length_of_nurses_alloted);
-                    nurse = &nurses[room[r_index].nurses_alloted[rand_nurse]];
-                    if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
-                    for (s = 0; s < nurse->num_shifts; ++s) {
-                        if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
-                        if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
-                        most_suitable_shift = s;
-                        break;
-                    }
-                    if (++iter > num_nurses * 2) break; // running this randomization for num_nurses*2 times
-                } while (most_suitable_shift == -1);
-            }
-
-            // checking in the shift sh for nurses in case there's no suitable nurse already assigned to that room
-            if (most_suitable_shift == -1) {
-                iter = 0;
-                do {
-                    rand_nurse = rand() % (current_size_dm_nurse[sh]);
-                    nurse = dm_nurses_availability[sh][rand_nurse];
-                    if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
-                    for (s = 0; s < nurse->num_shifts; ++s) {
-                        if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
-                        if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
-                        most_suitable_shift = s;
-                    }
-                    if (++iter > num_nurses * 2) break; // running this randomization for num_nurses*2 times
-                } while (most_suitable_shift == -1);
-            }
-            if (most_suitable_shift == -1) { ++unattended_shifts; continue; }
-
-            track_room_shift[r_index][sh] = nurse->id;
-            // Allocate room to nurse's shift
-            if (!nurse->shift[most_suitable_shift].num_rooms) new_rooms = calloc(1, sizeof(int));
-            else new_rooms = realloc(nurse->shift[most_suitable_shift].rooms, (nurse->shift[most_suitable_shift].num_rooms + 1) * sizeof(int));
-            if (!new_rooms) ASSERT(0, "Memory Allocation Error!");
-            nurse->shift[most_suitable_shift].rooms = new_rooms;
-            nurse->shift[most_suitable_shift].rooms[nurse->shift[most_suitable_shift].num_rooms++] = r_id;
-            nurse->shift[most_suitable_shift].load_left -= rooms_requirement[r_index][sh].load_sum;
-            if (nurse->shift[most_suitable_shift].load_left < 0) nurse->shift[most_suitable_shift].load_left = 0;
-
-            // Allocate nurse to room
-            if (!room[r_index].length_of_nurses_alloted) new_nurses = calloc(1, sizeof(int));
-            else new_nurses = realloc(room[r_index].nurses_alloted, (room[r_index].length_of_nurses_alloted + 1) * sizeof(int));
-            if (!new_nurses) ASSERT(0, "Memory Allocation Error!");
-            room[r_index].nurses_alloted = new_nurses;
-            room[r_index].nurses_alloted[room[r_index].length_of_nurses_alloted++] = nurse->id;
-
-            // Update patients and occupants
-            day = sh / 3;
-            for (p_index = 0; p_index < size_of_room_schedule[r_index][day]; ++p_index) {
-                char* entry = room_schedule[r_index][day][p_index];
-                if (*entry == 'p') {
-                    int id = str2int(entry);
-                    if (!patients[id].num_nurses_allotted) new_nurses_p = calloc(1, sizeof(int));
-                    else new_nurses_p = realloc(patients[id].nurses_allotted, (patients[id].num_nurses_allotted + 1) * sizeof(int));
-                    if (!new_nurses_p) ASSERT(0, "Memory Allocation Error!");
-                    patients[id].nurses_allotted = new_nurses_p;
-                    patients[id].nurses_allotted[patients[id].num_nurses_allotted++] = nurse->id;
-                }
-                else if (*entry == 'a') {
-                    int occ = str2int(entry);
-                    if (!occupants[occ].num_nurses_alloted) new_nurses_occ = calloc(1, sizeof(int));
-                    else new_nurses_occ = realloc(occupants[occ].nurses_alloted, (occupants[occ].num_nurses_alloted + 1) * sizeof(int));
-                    if (!new_nurses_occ) ASSERT(0, "Memory Allocation Error!");
-                    occupants[occ].nurses_alloted = new_nurses_occ;
-                    occupants[occ].nurses_alloted[occupants[occ].num_nurses_alloted++] = nurse->id;
-                }
-            }
-        }
+    for (i = 0; i < 2; ++i) {
+        CROSSOVER_PARENT_STORAGE_PLACE[i] = (int*)realloc(CROSSOVER_PARENT_STORAGE_PLACE[i], size * sizeof(int));
+        ASSERT(CROSSOVER_PARENT_STORAGE_PLACE[i], "Dynamic Memory Allocation Error for CROSSOVER_PARENT_STORAGE_PLACE[i]");
     }
-
-    temp = unattended_shifts;
-    for (i = 0, unattended_shifts = 0; i < num_rooms; ++i) for (j = 0; j < days * 3; ++j)
-        if (track_room_shift[i][j] == -1 && room[i].num_patients_info[j / 3]) unattended_shifts++;
-    if (temp != unattended_shifts) ASSERT(0, "Kuch gadbad hai re baaba - in calculation of unattended_shifts");
-    for (int i = 0; i < num_rooms; i++) free(track_room_shift[i]);
-    free(track_room_shift);
-	track_room_shift = NULL; // Avoid dangling pointer
-    return unattended_shifts;
 }
 
-int main(void) {
-    clock_t start, end;
-    double cpu_time_used;
+static void generateSubOptionalChromosome(int chromo_num) {
+    int i, j, r1, r2;
+
+    // Copy the optional part from chromosome 0
+    for (i = mandatory_count; i < CHROMOSOME_SIZE_INTE_GA-5; ++i) POPULATION[chromo_num][i] = POPULATION[chromo_num-1][i];
+
+    for (i = CHROMOSOME_SIZE_INTE_GA - 6; i >= (mandatory_count*2); --i) {
+        do {
+            r1 = mandatory_count + (int)(rand()) % optional_count;
+            r2 = mandatory_count + (int)(rand()) % optional_count;
+        } while (r1 == r2);
+        // printf("\nrandom numbers are: %d and %d", r1, r2);
+        // Swap POPULATION[chromo_num][i] and POPULATION[chromo_num][j]
+        int temp = POPULATION[chromo_num][r1];
+        POPULATION[chromo_num][r1] = POPULATION[chromo_num][r2];
+        POPULATION[chromo_num][r2] = temp;
+    }
+}
+
+static void appendOptionals(void) {
+    /*
+    * Transfer the poluation of MANDATORY_POPULATION to POPULATION
+    * Append Optional patients at the end of each solution in the population.
+    */
+    int i;
+    for (i = 0; i < POP_SIZE; ++i) {
+		if (POPULATION[i]) POPULATION[i] = (int*)realloc(POPULATION[i], CHROMOSOME_SIZE_INTE_GA * sizeof(int));
+		ASSERT(POPULATION[i], "Dynamic Memory Allocation Error for POPULATION[i]");
+        memcpy(POPULATION[i], MANDATORY_POPULATION[i], mandatory_count * sizeof(int));
+    }
+
+    for (i = 0; i < optional_count; ++i) POPULATION[0][mandatory_count + i] = optional_patients[i]->id;
+    for (i = 1; i < POP_SIZE; ++i) generateSubOptionalChromosome(i);
+}
+
+/*
+int main(int argc, char* argv[]) {
+    clock_t start, end, algo_start, algo_end;
+    double cpu_time_used, algo_cpu_time_used;
+    char* filename = NULL, * output_filename = NULL, * save_dir = NULL, type;
+    int j, count, N_MANDATORY_GA_RUNS = 100000, i, number;
+    bool flag = false;
+
+    // ---- Argument Parsing ----
+    if (argc < 3) {
+        printf("Usage: %s <input_json_path> <output_filename_prefix>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    filename = argv[1];           // e.g., ../data/train/i01.json
+    output_filename = argv[2];    // e.g., tr_new_ga1
+    save_dir = "../output/new_ga/long";
+
+    printf("\nRunning GA with input: %s\nOutput prefix: %s\n", filename, output_filename);
+
     start = clock();
 
-    parse_json("../data/test/test10.json");
+    // -------- Existing Logic --------
+    parse_json(filename);
     srand(time(NULL));
-    size = num_patients;
 
-    /*
-     * NOTE: There is no ranking system for the patients in this implementation.
-     The chromosome structure will be -
-     patients (num_patients) + violations (v) + cost (c) + v_rank + c_rank + objective_function (f)
-     So that -
-     CHROMOSOME_SIZE_INTE_GA = num_patients + 5
-     last patients : chromosome[num_patients-1]
-     violations : chromosome[num_patients]
-     cost : chromosome[num_patients+1]
-     v_rank : chromosome[num_patients+2] // not using
-     c_rank : chromosome[num_patients+3] // not using
-     f : chromosome[num_patients+4]
+    type = 'm'; // either 'm' for only mandatory or 'p' for all patients
+    if (type == 'p') number = num_patients;
+    else if (type == 'm') number = mandatory_count;
+    else {
+        printf("\nWrong type given: %c", type);
+        exit(EXIT_FAILURE);
+    }
 
-     f = alpha*v_rank + (1-alpha)*c_rank;
-     Minimize f;
-     */
+    size = mandatory_count + 5;
+    CHROMOSOME_SIZE_INTE_GA = size;
 
-    CHROMOSOME_SIZE_INTE_GA = size + 5;
+    MANDATORY_POPULATION = (int**)calloc(POP_SIZE, sizeof(int*));
+    ASSERT(MANDATORY_POPULATION, "Dynamic Memory Allocation Error");
+
+    for (i = 0; i < POP_SIZE; ++i) {
+        MANDATORY_POPULATION[i] = (int*)calloc(mandatory_count, sizeof(int));
+        ASSERT(MANDATORY_POPULATION[i], "Dynamic Memory Allocation Error");
+    }
+
+
+    if (number < 50) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 1;
+        NURSE_MAX_LOAD_ALLOWANCE = 1;
+    }
+    else if (number < 100) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
+        NURSE_MAX_LOAD_ALLOWANCE = 3;
+    }
+    else if (number < 300) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
+        NURSE_MAX_LOAD_ALLOWANCE = 5;
+    }
+    else if (number < 700) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
+        NURSE_MAX_LOAD_ALLOWANCE = 5;
+    }
+    else {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 4;
+        NURSE_MAX_LOAD_ALLOWANCE = 7;
+    }
+
     allocate_surgeon_day_theatre_count();
     initDataStructuresInteGA();
     initialize_room_gender_map(&room_gender_map);
     initialize_room_shift_nurse();
     populate_room_gender_map(&room_gender_map);
-    printf("\nMandatory Patients: %d\n", mandatory_count);
-    printf("\nOptional Patients: %d\n", optional_count);
     create_dm_nurses_availability();
-    sorting_nurse_id_max_load();
-    create_3d_array();
-    initialize_rooms_req(num_rooms);
-    create_rooms_req();
+    for (int i = 0; i < 3 * days; i++) if (current_size_dm_nurse[i] > 1) quicksort(dm_nurses_availability[i], 0, current_size_dm_nurse[i] - 1);
 
-    applyIntegratedGA();
+    algo_start = clock();
+
+    /*Change starts :
+    * We want to create a population of multiple G_BESTs from mandatory_only Genetic algorithm.
+    * We will have multiple only mandatory G_BESTs which will comprise the initial population for the next GA.
+    * Run applyIntegratedGA multiple times (10) and get as many violation free G_BESTs as possible.
+    */
+
+    printf("\nStarting mandatory GA...");
+    for (i = 0, count = 0; i < N_MANDATORY_GA_RUNS; i++) {
+        if (count == POP_SIZE) break;
+        applyIntegratedGA(type);
+        for (j = 0; j < POP_SIZE; ++j) {
+            if (count == POP_SIZE) break;
+            printf("\nPOPULATION[%d][mandatory_count]: %d", j, POPULATION[j][mandatory_count]);
+            if (!POPULATION[j][mandatory_count]) {
+                memcpy(MANDATORY_POPULATION[count], POPULATION[j], mandatory_count * sizeof(int));
+                count++;
+                // printf("\n[population] chromosome: %d\n", j);
+                // for (int k = 0; k < mandatory_count; ++k) printf("%d, ", MANDATORY_POPULATION[j][k]);
+            }
+        }
+    }
+    if (count != POP_SIZE) {
+        printf("\nmandatory_only GA is not able to produce enough violation-free solutions. Increase the variable N_MANDATORY_GA_RUNS");
+        exit(EXIT_FAILURE);
+    }
+    /*
+    printf("\nNumber of iterations taken to get %d violation free mandatory chromosomes: %d\n", POP_SIZE, i);
+
+    printf("\nPrinting population before appending optionals\n");
+    for (i = 0; i < POP_SIZE; ++i) {
+        printf("Chromosome %d: ", i + 1);
+        for (j = 0; j < mandatory_count; ++j)
+            printf("%d ", MANDATORY_POPULATION[i][j]);
+        putchar('\n');
+    }
+    */
+
+    type = 'p';
+    size = num_patients + 5;
+    CHROMOSOME_SIZE_INTE_GA = size;
+    appendOptionals();
+    resizeDataStructures();
+
+    // printf("\nPrinting population to check whether the optionals have been appended successfully or not\n");
+    // printPopulationInteGA(type);
+
+    for (i = 0; i < POP_SIZE; ++i) free(MANDATORY_POPULATION[i]);
+    free(MANDATORY_POPULATION);
+    MANDATORY_POPULATION = NULL; // Avoid dangling pointer
+    if (room_schedule) free_3d_array();
+    if (rooms_requirement) cleanup_rooms_req(num_rooms);
+    room_schedule = NULL;
+    rooms_requirement = NULL;
+    applyIntegratedGA(type);
+    algo_end = clock();
+
+    /*
     reset_valuesInteGA();
-    admitPatientsInteGA(&room_gender_map, G_BEST);
-    printf("\n\nFinal #Violations: %d", findViolations() + nurseAllocationInteGA());
-    printf("\n\nFinal #Cost: %d\n", findCost());
+    int violations = admitPatientsInteGA(G_BEST, 'p');
+    printf("\n\nPrinting G_BEST after final admitPatients function: \n");
+    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; ++i) printf("%d ", G_BEST[i]);
 
-    create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, "test10_nu", "../output");
+    create_3d_array(type);
+    create_rooms_req();
+    int nurse_violations = nurseAllocationInteGA();
+    printf("\n\nFinal #Violations [admit_patients]: %d", findViolations();
+    printf("\n\nFinal #Violations [nurse]: %d", nurse_violations);
+    */
+    evaluateViolationsAndCost(G_BEST, 'p');
+    printf("\n\nFinal #Violations: %d\n", G_BEST[num_patients]);
+    printf("\n\nFinal #Cost: %d\n", G_BEST[num_patients + 1]);
+
+    create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, output_filename, save_dir);
+    //create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, "new_ga3", save_dir);
     free_occupants();
     free_patients();
     free_surgeons();
     free_ots();
     free_rooms();
     free_nurses();
-	free_dm_nurses_availability();
-	free_3d_array();
+    free_dm_nurses_availability();
+    free_3d_array();
+    cleanup_rooms_req(num_rooms);
     freeDataStructuresInteGA();
     free(weights);
-	weights = NULL; // Avoid dangling pointer
+    weights = NULL; // Avoid dangling pointer
 
     end = clock();    // End time
     cpu_time_used = ((double)(end - start)) / (CLOCKS_PER_SEC * 60);
-    printf("Time taken: %f minutes\n", cpu_time_used);
+    algo_cpu_time_used = ((double)(algo_end - algo_start)) / (CLOCKS_PER_SEC * 60);
+
+    printf("\n\nTime taken by whole program: %f minutes.", cpu_time_used);
+    printf("\nTime taken by the Algorithm: %f minutes.\n", algo_cpu_time_used);
+    return 0;
+}
+*/
+
+int main(void) {
+    clock_t start, end, algo_start, algo_end;
+    double cpu_time_used, algo_cpu_time_used;
+    char* filename = NULL, * output_filename = NULL, * save_dir, type;
+    int j, count, N_MANDATORY_GA_RUNS = 10, i, number;
+    bool flag = NULL;
+	// add an opening bracket...
+
+    // parse command line arguments
+    printf("\nNumber of arguments: %d\n", argc);
+    for (int i = 0; i < argc; i++) printf("Argument %d: %s\n", i, argv[i]);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            puts("Usage: ./program -f <filename> -of <output_filename> -sd <save_dir> -P <population_size> -G <n_generations> -lb <lower_bound> \
+-ub <upper_bound> -pc <crossover_probability> -mp <biased_mutation_probability> -T <normalization_threashold> -C <convergence_stopping_criterion> \
+-of <output_filename>");
+            return 0;
+        }
+        else if ((strcmp(argv[i], "-f") == 0 || (strcmp(argv[i], "--filename") == 0)) && i + 1 < argc) filename = argv[++i];
+        else if ((strcmp(argv[i], "-of") == 0 || (strcmp(argv[i], "--output_filename") == 0)) && i + 1 < argc) output_filename = argv[++i];
+        else if ((strcmp(argv[i], "-sd") == 0 || (strcmp(argv[i], "--save_dir") == 0)) && i + 1 < argc) save_dir = argv[++i];
+        else if ((strcmp(argv[i], "-C") == 0 || (strcmp(argv[i], "--convergence_stopping_criterion") == 0)) && i + 1 < argc) 
+            CONVERGENCE_STOPPING_CRITERION = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-P") == 0 || (strcmp(argv[i], "--Pop_size") == 0)) && i + 1 < argc) POP_SIZE = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-G") == 0 || (strcmp(argv[i], "--n_gneerations") == 0)) && i + 1 < argc) N_GEN = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-lb") == 0 || (strcmp(argv[i], "--lower_bound") == 0)) && i + 1 < argc) lower_bound = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-ub") == 0 || (strcmp(argv[i], "--upper_bound") == 0)) && i + 1 < argc) upper_bound = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-pc") == 0 || (strcmp(argv[i], "--crossover_probability") == 0)) && i + 1 < argc) p_c = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-T") == 0 || (strcmp(argv[i], "--normalization_threashold") == 0)) && i + 1 < argc) THREASHOLD = atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-pm") == 0 || (strcmp(argv[i], "--biased_permutation_probability") == 0)) && i + 1 < argc) p_m = atoi(argv[++i]);
+        else printf("Unknown argument: %s\n", argv[i]);
+    }
+	// add closing bracket
+    start = clock();
+
+	//parse_json(filename); // Use the default filename or the one provided in command line arguments
+    parse_json("../data/train/i03.json");
+    output_filename = "tr_new_ga3";
+    save_dir = "../output/new_ga/train";
+    srand(time(NULL));
+    type = 'm'; // either 'm' for only mandatory or 'p' for all patients
+    if (type == 'p') number = num_patients;
+    else
+        if (type == 'm') number = mandatory_count;
+        else {
+            printf("\nWrong type given: %c", type);
+            printf("function: main");
+            exit(EXIT_FAILURE); 
+        }
+
+    size = mandatory_count + 5;
+    CHROMOSOME_SIZE_INTE_GA = size;
+    MANDATORY_POPULATION = (int**)calloc(POP_SIZE, sizeof(int*));
+    ASSERT(MANDATORY_POPULATION, "Dynamic Memory Allocation Error");
+
+    for (i = 0; i < POP_SIZE; ++i) {
+        MANDATORY_POPULATION[i] = (int*)calloc(mandatory_count, sizeof(int));
+        ASSERT(MANDATORY_POPULATION[i], "Dynamic Memory Allocation Error");
+    }
+
+    if (number < 50) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 1;
+        NURSE_MAX_LOAD_ALLOWANCE = 1;
+    }
+    else if (number < 100) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
+        NURSE_MAX_LOAD_ALLOWANCE = 3;
+    }
+    else if (number < 300) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
+        NURSE_MAX_LOAD_ALLOWANCE = 5;
+    }
+    else if (number < 700) {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
+        NURSE_MAX_LOAD_ALLOWANCE = 5;
+    }
+    else {
+        NURSE_SKILL_LEVEL_ALLOWANCE = 4;
+        NURSE_MAX_LOAD_ALLOWANCE = 7;
+    }
+
+    allocate_surgeon_day_theatre_count();
+    initDataStructuresInteGA();
+    initialize_room_gender_map(&room_gender_map);
+    initialize_room_shift_nurse();
+    populate_room_gender_map(&room_gender_map);
+    create_dm_nurses_availability();
+    for (int i = 0; i < 3 * days; i++) if (current_size_dm_nurse[i] > 1) quicksort(dm_nurses_availability[i], 0, current_size_dm_nurse[i] - 1);
+
+    algo_start = clock();
+
+    // add an opening bracket...
+    Change starts :
+    * We want to create a population of multiple G_BESTs from mandatory_only Genetic algorithm.
+    * We will have multiple only mandatory G_BESTs which will comprise the initial population for the next GA.
+    * Run applyIntegratedGA multiple times (10) and get as many violation free G_BESTs as possible.
+	// add a clsosing bracket
+
+    printf("\nStarting mandatory GA...");
+    for (i = 0, count = 0; i < N_MANDATORY_GA_RUNS; i++) {
+        if (count == POP_SIZE) break;
+        applyIntegratedGA(type);
+        for (j = 0; j < POP_SIZE; ++j) {
+            if (count == POP_SIZE) break;
+            printf("\nPOPULATION[%d][mandatory_count]: %d", j, POPULATION[j][mandatory_count]);
+            if (!POPULATION[j][mandatory_count]) {
+                memcpy(MANDATORY_POPULATION[count], POPULATION[j], mandatory_count * sizeof(int));
+                count++;
+                // printf("\n[population] chromosome: %d\n", j);
+                // for (int k = 0; k < mandatory_count; ++k) printf("%d, ", MANDATORY_POPULATION[j][k]);
+            }
+        }
+    }
+    if (count != POP_SIZE) {
+        printf("\nmandatory_only GA is not able to produce enough violation-free solutions. Increase the variable N_MANDATORY_GA_RUNS");
+        exit(EXIT_FAILURE);
+    }
+    // add an opening bracket...
+    printf("\nNumber of iterations taken to get %d violation free mandatory chromosomes: %d\n", POP_SIZE, i);
+    
+    printf("\nPrinting population before appending optionals\n");
+    for (i = 0; i < POP_SIZE; ++i) {
+        printf("Chromosome %d: ", i + 1);
+        for (j = 0; j < mandatory_count; ++j)
+            printf("%d ", MANDATORY_POPULATION[i][j]);
+        putchar('\n');
+    }
+	// add a closing bracket
+
+    type = 'p';
+    size = num_patients + 5;
+    CHROMOSOME_SIZE_INTE_GA = size;
+    appendOptionals();
+    resizeDataStructures();
+
+    // printf("\nPrinting population to check whether the optionals have been appended successfully or not\n");
+    // printPopulationInteGA(type);
+
+	for (i = 0; i < POP_SIZE; ++i) free(MANDATORY_POPULATION[i]);
+    free(MANDATORY_POPULATION);
+	MANDATORY_POPULATION = NULL; // Avoid dangling pointer
+    if (room_schedule) free_3d_array();
+    if (rooms_requirement) cleanup_rooms_req(num_rooms);
+    room_schedule = NULL;
+    rooms_requirement = NULL;
+    applyIntegratedGA(type);
+    algo_end = clock();
+
+    // add an opening bracket...
+    reset_valuesInteGA();
+    int violations = admitPatientsInteGA(G_BEST, 'p');
+    printf("\n\nPrinting G_BEST after final admitPatients function: \n");
+    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; ++i) printf("%d ", G_BEST[i]);
+
+    create_3d_array(type);
+    create_rooms_req();
+    int nurse_violations = nurseAllocationInteGA();
+    printf("\n\nFinal #Violations [admit_patients]: %d", findViolations();
+    printf("\n\nFinal #Violations [nurse]: %d", nurse_violations);
+	// add a closing bracket
+
+    evaluateViolationsAndCost(G_BEST, 'p');
+    printf("\n\nFinal #Violations: %d\n", G_BEST[num_patients]);
+    printf("\n\nFinal #Cost: %d\n", G_BEST[num_patients + 1]);
+
+    create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, output_filename, save_dir);
+    //create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, "new_ga3", save_dir);
+    free_occupants();
+    free_patients();
+    free_surgeons();
+    free_ots();
+    free_rooms();
+    free_nurses();
+    free_dm_nurses_availability();
+    free_3d_array();
+	cleanup_rooms_req(num_rooms);
+    freeDataStructuresInteGA();
+    free(weights);
+    weights = NULL; // Avoid dangling pointer
+
+    end = clock();    // End time
+    cpu_time_used = ((double)(end - start)) / (CLOCKS_PER_SEC * 60);
+    algo_cpu_time_used = ((double)(algo_end - algo_start)) / (CLOCKS_PER_SEC * 60);
+
+    printf("\n\nTime taken by whole program: %f minutes.", cpu_time_used);
+    printf("\nTime taken by the Algorithm: %f minutes.\n", algo_cpu_time_used);
     return 0;
 }
 
