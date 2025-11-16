@@ -1595,19 +1595,9 @@ int countDigits(int num) {
 #include <sys/stat.h>
 #endif
 
-void create_json_file(Patient* patients, int num_patients, Nurses* nurse, int num_nurses, int num_rooms, const char* instance_name, const char* output_folder) {
-    // Create output directory
-#ifdef _WIN32
-    if (_mkdir(output_folder) != 0) perror("Error creating folder");
-#else
-    if (mkdir(output_folder, 0777) != 0) perror("Error creating folder");
-#endif
-
-    char filepath[200];
-    snprintf(filepath, sizeof(filepath), "%s/sol_%s.json", output_folder, instance_name);
-    // snprintf(filepath, sizeof(filepath), "%s/sol_%s_run%d.json", output_folder, instance_name, run_number);
-
-    FILE* file = fopen(filepath, "w");
+void create_json_file(Patient* patients, int num_patients, Nurses* nurse, int num_nurses, int num_rooms, char* output_path) {
+    
+    FILE* file = fopen(output_path, "w");
     if (file == NULL) {
         perror("Error opening file");
         return;
@@ -1666,8 +1656,7 @@ void create_json_file(Patient* patients, int num_patients, Nurses* nurse, int nu
     fprintf(file, "}\n");
 
     fclose(file);
-    //printf("\nJSON file saved at: sol_%s/%s.json\n", output_folder, instance_name);
-    printf("JSON file saved at: %s\n", filepath);
+    printf("JSON file saved at: %s\n", output_path);
 }
 
 //-------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -2420,9 +2409,14 @@ void normalize(char type) {
         if (POPULATION[i][number] > max_violations) max_violations = POPULATION[i][number];
         if (POPULATION[i][number + 1] > max_cost) max_cost = POPULATION[i][number + 1];
     }
+    // Replace the normalization loop with:
     for (i = 0; i < POP_SIZE; ++i) {
-        v = (POPULATION[i][number] * THREASHOLD) / max_violations;
-        c = (POPULATION[i][number + 1] * THREASHOLD) / max_cost;
+        if (max_violations > 0) v = (POPULATION[i][number] * THREASHOLD) / max_violations;
+        else v = 0;  // or THREASHOLD if you want to penalize zero violations
+
+        if (max_cost > 0) c = (POPULATION[i][number + 1] * THREASHOLD) / max_cost;
+        else c = 0;
+
         v_floor = v;
         c_floor = c;
         if ((v_floor + 0.5) < v) v_floor++;
@@ -3366,36 +3360,52 @@ int nurseAllocationInteGA(void)
             most_suitable_shift = -1;
             // first checking the room if any nurse is available - increasing continuity of care
             if (room[r_index].length_of_nurses_allotted) {
-                do {
-                    if (++iter > (num_nurses * 2)) break; // running this randomization for num_nurses*2 times
-                    rand_nurse = rand() % (room[r_index].length_of_nurses_allotted);
-                    nurse = &nurses[room[r_index].nurses_allotted[rand_nurse]];
-                    if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
-                    for (s = 0; s < nurse->num_shifts; ++s) {
-                        if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
-                        if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
-                        most_suitable_shift = s;
-                        break;
-                    }
-                } while (most_suitable_shift == -1);
+                if (room[r_index].length_of_nurses_allotted == 0) {
+                    most_suitable_shift = -1;
+                }
+                else {
+                    // existing do-while loop
+                    do {
+                        if (++iter > (num_nurses * 2)) break; // running this randomization for num_nurses*2 times
+                        rand_nurse = rand() % (room[r_index].length_of_nurses_allotted);
+                        nurse = &nurses[room[r_index].nurses_allotted[rand_nurse]];
+                        if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req)
+                            continue;
+                        for (s = 0; s < nurse->num_shifts; ++s) {
+                            if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
+                            if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum)
+                                break;
+                            most_suitable_shift = s;
+                            break;
+                        }
+                    } while (most_suitable_shift == -1);
+                }
             }
 
             // checking in the shift sh for nurses in case there's no suitable nurse already assigned to that room
             if (most_suitable_shift == -1) {
                 iter = 0;
-                do {
-                    if (++iter > num_nurses * 2) break; // running this randomization for num_nurses*2 times
-                    rand_nurse = rand() % (current_size_dm_nurse[sh]);
-                    nurse = dm_nurses_availability[sh][rand_nurse];
-                    if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
-                    for (s = 0; s < nurse->num_shifts; ++s) {
-                        if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
-                        if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
-                        most_suitable_shift = s;
-                        break;
+                if (most_suitable_shift == -1) {
+                    if (current_size_dm_nurse[sh] == 0) {
+                        ++unattended_shifts;
+                        continue;
                     }
-                } while (most_suitable_shift == -1);
+                    // existing do-while loop
+                    do {
+                        if (++iter > num_nurses * 2) break; // running this randomization for num_nurses*2 times
+                        rand_nurse = rand() % (current_size_dm_nurse[sh]);
+                        nurse = dm_nurses_availability[sh][rand_nurse];
+                        if ((nurse->skill_level + NURSE_SKILL_LEVEL_ALLOWANCE) < rooms_requirement[r_index][sh].max_skill_req) continue;
+                        for (s = 0; s < nurse->num_shifts; ++s) {
+                            if ((nurse->shift[s].day * 3 + nurse->shift[s].shift_time) != sh) continue;
+                            if ((nurse->shift[s].load_left + NURSE_MAX_LOAD_ALLOWANCE) < rooms_requirement[r_index][sh].load_sum) break;
+                            most_suitable_shift = s;
+                            break;
+                        }
+                    } while (most_suitable_shift == -1);
+                }
             }
+
             if (most_suitable_shift == -1) { ++unattended_shifts; continue; }
 
             track_room_shift[r_index][sh] = nurse->id;
@@ -3606,240 +3616,114 @@ static void appendOptionals(void) {
     for (i = 1; i < POP_SIZE; ++i) generateSubOptionalChromosome(i);
 }
 
-/*
 int main(int argc, char* argv[]) {
     clock_t start, end, algo_start, algo_end;
     double cpu_time_used, algo_cpu_time_used;
-    char* filename = NULL, * output_filename = NULL, * save_dir = NULL, type;
-    int j, count, N_MANDATORY_GA_RUNS = 100000, i, number;
-    bool flag = false;
+    char* input_path = NULL;
+    char* output_path = NULL;
+    char type;
+    int j, count, N_MANDATORY_GA_RUNS = 10, i, number;
+    int CONVERGENCE_STOPPING_CRITERION = 1000;  // Default value
 
-    // ---- Argument Parsing ----
+    start = clock();
+
+    // =======================================================
+    // PARSE COMMAND LINE ARGUMENTS
+    // =======================================================
     if (argc < 3) {
-        printf("Usage: %s <input_json_path> <output_filename_prefix>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input_json> <output_json> [options]\n", argv[0]);
+        fprintf(stderr, "Options:\n");
+        fprintf(stderr, "  -P <size>     Population size (default: 8000)\n");
+        fprintf(stderr, "  -G <gens>     Generations (default: 120000)\n");
+        fprintf(stderr, "  -lb <bound>   Lower bound (default: 0.2)\n");
+        fprintf(stderr, "  -ub <bound>   Upper bound (default: 0.9)\n");
+        fprintf(stderr, "  -pc <prob>    Crossover probability (default: 0.1)\n");
+        fprintf(stderr, "  -pm <prob>    Mutation probability (default: 0.05)\n");
+        fprintf(stderr, "  -T <thresh>   Normalization threshold (default: 1000)\n");
         return EXIT_FAILURE;
     }
 
-    filename = argv[1];           // e.g., ../data/train/i01.json
-    output_filename = argv[2];    // e.g., tr_new_ga1
-    save_dir = "../output/new_ga/long";
+    // First two arguments are required: input and output files
+    input_path = argv[1];
+    output_path = argv[2];
 
-    printf("\nRunning GA with input: %s\nOutput prefix: %s\n", filename, output_filename);
+    printf("\n=======================================================\n");
+    printf("  INTEGRATED GENETIC ALGORITHM - NURSE SCHEDULING\n");
+    printf("=======================================================\n");
+    printf("Input file:  %s\n", input_path);
+    printf("Output file: %s\n", output_path);
 
-    start = clock();
-
-    // -------- Existing Logic --------
-    parse_json(filename);
-    srand(time(NULL));
-
-    type = 'm'; // either 'm' for only mandatory or 'p' for all patients
-    if (type == 'p') number = num_patients;
-    else if (type == 'm') number = mandatory_count;
-    else {
-        printf("\nWrong type given: %c", type);
-        exit(EXIT_FAILURE);
-    }
-
-    size = mandatory_count + 5;
-    CHROMOSOME_SIZE_INTE_GA = size;
-
-    MANDATORY_POPULATION = (int**)calloc(POP_SIZE, sizeof(int*));
-    ASSERT(MANDATORY_POPULATION, "Dynamic Memory Allocation Error");
-
-    for (i = 0; i < POP_SIZE; ++i) {
-        MANDATORY_POPULATION[i] = (int*)calloc(mandatory_count, sizeof(int));
-        ASSERT(MANDATORY_POPULATION[i], "Dynamic Memory Allocation Error");
-    }
-
-
-    if (number < 50) {
-        NURSE_SKILL_LEVEL_ALLOWANCE = 1;
-        NURSE_MAX_LOAD_ALLOWANCE = 1;
-    }
-    else if (number < 100) {
-        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
-        NURSE_MAX_LOAD_ALLOWANCE = 3;
-    }
-    else if (number < 300) {
-        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
-        NURSE_MAX_LOAD_ALLOWANCE = 5;
-    }
-    else if (number < 700) {
-        NURSE_SKILL_LEVEL_ALLOWANCE = 3;
-        NURSE_MAX_LOAD_ALLOWANCE = 5;
-    }
-    else {
-        NURSE_SKILL_LEVEL_ALLOWANCE = 4;
-        NURSE_MAX_LOAD_ALLOWANCE = 7;
-    }
-
-    allocate_surgeon_day_theatre_count();
-    initDataStructuresInteGA();
-    initialize_room_gender_map(&room_gender_map);
-    initialize_room_shift_nurse();
-    populate_room_gender_map(&room_gender_map);
-    create_dm_nurses_availability();
-    for (int i = 0; i < 3 * days; i++) if (current_size_dm_nurse[i] > 1) quicksort(dm_nurses_availability[i], 0, current_size_dm_nurse[i] - 1);
-
-    algo_start = clock();
-
-    /*Change starts :
-    * We want to create a population of multiple G_BESTs from mandatory_only Genetic algorithm.
-    * We will have multiple only mandatory G_BESTs which will comprise the initial population for the next GA.
-    * Run applyIntegratedGA multiple times (10) and get as many violation free G_BESTs as possible.
-    */
-
-    printf("\nStarting mandatory GA...");
-    for (i = 0, count = 0; i < N_MANDATORY_GA_RUNS; i++) {
-        if (count == POP_SIZE) break;
-        applyIntegratedGA(type);
-        for (j = 0; j < POP_SIZE; ++j) {
-            if (count == POP_SIZE) break;
-            printf("\nPOPULATION[%d][mandatory_count]: %d", j, POPULATION[j][mandatory_count]);
-            if (!POPULATION[j][mandatory_count]) {
-                memcpy(MANDATORY_POPULATION[count], POPULATION[j], mandatory_count * sizeof(int));
-                count++;
-                // printf("\n[population] chromosome: %d\n", j);
-                // for (int k = 0; k < mandatory_count; ++k) printf("%d, ", MANDATORY_POPULATION[j][k]);
-            }
+    // Parse optional arguments
+    for (i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) {
+            POP_SIZE = atoi(argv[++i]);
         }
-    }
-    if (count != POP_SIZE) {
-        printf("\nmandatory_only GA is not able to produce enough violation-free solutions. Increase the variable N_MANDATORY_GA_RUNS");
-        exit(EXIT_FAILURE);
-    }
-    /*
-    printf("\nNumber of iterations taken to get %d violation free mandatory chromosomes: %d\n", POP_SIZE, i);
-
-    printf("\nPrinting population before appending optionals\n");
-    for (i = 0; i < POP_SIZE; ++i) {
-        printf("Chromosome %d: ", i + 1);
-        for (j = 0; j < mandatory_count; ++j)
-            printf("%d ", MANDATORY_POPULATION[i][j]);
-        putchar('\n');
-    }
-    */
-
-    type = 'p';
-    size = num_patients + 5;
-    CHROMOSOME_SIZE_INTE_GA = size;
-    appendOptionals();
-    resizeDataStructures();
-
-    // printf("\nPrinting population to check whether the optionals have been appended successfully or not\n");
-    // printPopulationInteGA(type);
-
-    for (i = 0; i < POP_SIZE; ++i) free(MANDATORY_POPULATION[i]);
-    free(MANDATORY_POPULATION);
-    MANDATORY_POPULATION = NULL; // Avoid dangling pointer
-    if (room_schedule) free_3d_array();
-    if (rooms_requirement) cleanup_rooms_req(num_rooms);
-    room_schedule = NULL;
-    rooms_requirement = NULL;
-    applyIntegratedGA(type);
-    algo_end = clock();
-
-    /*
-    reset_valuesInteGA();
-    int violations = admitPatientsInteGA(G_BEST, 'p');
-    printf("\n\nPrinting G_BEST after final admitPatients function: \n");
-    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; ++i) printf("%d ", G_BEST[i]);
-
-    create_3d_array(type);
-    create_rooms_req();
-    int nurse_violations = nurseAllocationInteGA();
-    printf("\n\nFinal #Violations [admit_patients]: %d", findViolations();
-    printf("\n\nFinal #Violations [nurse]: %d", nurse_violations);
-    */
-    evaluateViolationsAndCost(G_BEST, 'p');
-    printf("\n\nFinal #Violations: %d\n", G_BEST[num_patients]);
-    printf("\n\nFinal #Cost: %d\n", G_BEST[num_patients + 1]);
-
-    create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, output_filename, save_dir);
-    //create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, "new_ga3", save_dir);
-    free_occupants();
-    free_patients();
-    free_surgeons();
-    free_ots();
-    free_rooms();
-    free_nurses();
-    free_dm_nurses_availability();
-    free_3d_array();
-    cleanup_rooms_req(num_rooms);
-    freeDataStructuresInteGA();
-    free(weights);
-    weights = NULL; // Avoid dangling pointer
-
-    end = clock();    // End time
-    cpu_time_used = ((double)(end - start)) / (CLOCKS_PER_SEC * 60);
-    algo_cpu_time_used = ((double)(algo_end - algo_start)) / (CLOCKS_PER_SEC * 60);
-
-    printf("\n\nTime taken by whole program: %f minutes.", cpu_time_used);
-    printf("\nTime taken by the Algorithm: %f minutes.\n", algo_cpu_time_used);
-    return 0;
-}
-*/
-
-int main(void) {
-    clock_t start, end, algo_start, algo_end;
-    double cpu_time_used, algo_cpu_time_used;
-    char* filename = NULL, * output_filename = NULL, * save_dir, type;
-    int j, count, N_MANDATORY_GA_RUNS = 10, i, number;
-    bool flag = NULL;
-	// add an opening bracket...
-
-    // parse command line arguments
-    printf("\nNumber of arguments: %d\n", argc);
-    for (int i = 0; i < argc; i++) printf("Argument %d: %s\n", i, argv[i]);
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            puts("Usage: ./program -f <filename> -of <output_filename> -sd <save_dir> -P <population_size> -G <n_generations> -lb <lower_bound> \
--ub <upper_bound> -pc <crossover_probability> -mp <biased_mutation_probability> -T <normalization_threashold> -C <convergence_stopping_criterion> \
--of <output_filename>");
-            return 0;
+        else if (strcmp(argv[i], "-G") == 0 && i + 1 < argc) {
+            N_GEN = atoi(argv[++i]);
         }
-        else if ((strcmp(argv[i], "-f") == 0 || (strcmp(argv[i], "--filename") == 0)) && i + 1 < argc) filename = argv[++i];
-        else if ((strcmp(argv[i], "-of") == 0 || (strcmp(argv[i], "--output_filename") == 0)) && i + 1 < argc) output_filename = argv[++i];
-        else if ((strcmp(argv[i], "-sd") == 0 || (strcmp(argv[i], "--save_dir") == 0)) && i + 1 < argc) save_dir = argv[++i];
-        else if ((strcmp(argv[i], "-C") == 0 || (strcmp(argv[i], "--convergence_stopping_criterion") == 0)) && i + 1 < argc) 
+        else if (strcmp(argv[i], "-lb") == 0 && i + 1 < argc) {
+            lower_bound = atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "-ub") == 0 && i + 1 < argc) {
+            upper_bound = atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "-pc") == 0 && i + 1 < argc) {
+            p_c = atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "-pm") == 0 && i + 1 < argc) {
+            p_m = atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "-T") == 0 && i + 1 < argc) {
+            THREASHOLD = atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "-C") == 0 && i + 1 < argc) {
             CONVERGENCE_STOPPING_CRITERION = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-P") == 0 || (strcmp(argv[i], "--Pop_size") == 0)) && i + 1 < argc) POP_SIZE = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-G") == 0 || (strcmp(argv[i], "--n_gneerations") == 0)) && i + 1 < argc) N_GEN = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-lb") == 0 || (strcmp(argv[i], "--lower_bound") == 0)) && i + 1 < argc) lower_bound = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-ub") == 0 || (strcmp(argv[i], "--upper_bound") == 0)) && i + 1 < argc) upper_bound = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-pc") == 0 || (strcmp(argv[i], "--crossover_probability") == 0)) && i + 1 < argc) p_c = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-T") == 0 || (strcmp(argv[i], "--normalization_threashold") == 0)) && i + 1 < argc) THREASHOLD = atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-pm") == 0 || (strcmp(argv[i], "--biased_permutation_probability") == 0)) && i + 1 < argc) p_m = atoi(argv[++i]);
-        else printf("Unknown argument: %s\n", argv[i]);
-    }
-	// add closing bracket
-    start = clock();
-
-	//parse_json(filename); // Use the default filename or the one provided in command line arguments
-    parse_json("../data/train/i03.json");
-    output_filename = "tr_new_ga3";
-    save_dir = "../output/new_ga/train";
-    srand(time(NULL));
-    type = 'm'; // either 'm' for only mandatory or 'p' for all patients
-    if (type == 'p') number = num_patients;
-    else
-        if (type == 'm') number = mandatory_count;
-        else {
-            printf("\nWrong type given: %c", type);
-            printf("function: main");
-            exit(EXIT_FAILURE); 
         }
+        else {
+            fprintf(stderr, "Warning: Unknown argument: %s\n", argv[i]);
+        }
+    }
 
+    printf("\nGA Parameters:\n");
+    printf("  Population size:      %d\n", POP_SIZE);
+    printf("  Generations:          %d\n", N_GEN);
+    printf("  Mandatory GA runs:    %d\n", N_GEN_MANDATORY);
+    printf("  Crossover prob:       %.3f\n", p_c);
+    printf("  Mutation prob:        %.3f\n", p_m);
+    printf("  Lower bound (alpha):  %.2f\n", lower_bound);
+    printf("  Upper bound (alpha):  %.2f\n", upper_bound);
+    printf("  Threshold:            %.0f\n", THREASHOLD);
+    printf("=======================================================\n\n");
+
+    // =======================================================
+    // PARSE INPUT JSON
+    // =======================================================
+    printf("Parsing input file...\n");
+    parse_json(input_path);
+    srand((unsigned int)time(NULL));
+
+    // =======================================================
+    // PHASE 1: MANDATORY PATIENTS ONLY
+    // =======================================================
+    type = 'm';
+    number = mandatory_count;
     size = mandatory_count + 5;
     CHROMOSOME_SIZE_INTE_GA = size;
+
+    printf("\n=======================================================\n");
+    printf("  PHASE 1: MANDATORY PATIENTS (%d patients)\n", mandatory_count);
+    printf("=======================================================\n");
+
+    // Allocate mandatory population storage
     MANDATORY_POPULATION = (int**)calloc(POP_SIZE, sizeof(int*));
-    ASSERT(MANDATORY_POPULATION, "Dynamic Memory Allocation Error");
+    ASSERT(MANDATORY_POPULATION, "Dynamic Memory Allocation Error for MANDATORY_POPULATION");
 
     for (i = 0; i < POP_SIZE; ++i) {
         MANDATORY_POPULATION[i] = (int*)calloc(mandatory_count, sizeof(int));
-        ASSERT(MANDATORY_POPULATION[i], "Dynamic Memory Allocation Error");
+        ASSERT(MANDATORY_POPULATION[i], "Dynamic Memory Allocation Error for MANDATORY_POPULATION[i]");
     }
 
+    // Set allowances based on problem size
     if (number < 50) {
         NURSE_SKILL_LEVEL_ALLOWANCE = 1;
         NURSE_MAX_LOAD_ALLOWANCE = 1;
@@ -3861,92 +3745,156 @@ int main(void) {
         NURSE_MAX_LOAD_ALLOWANCE = 7;
     }
 
+    printf("Nurse allowances: skill=%d, load=%d\n",
+        NURSE_SKILL_LEVEL_ALLOWANCE, NURSE_MAX_LOAD_ALLOWANCE);
+
+    // Initialize data structures
+    printf("Initializing data structures...\n");
     allocate_surgeon_day_theatre_count();
     initDataStructuresInteGA();
     initialize_room_gender_map(&room_gender_map);
     initialize_room_shift_nurse();
     populate_room_gender_map(&room_gender_map);
     create_dm_nurses_availability();
-    for (int i = 0; i < 3 * days; i++) if (current_size_dm_nurse[i] > 1) quicksort(dm_nurses_availability[i], 0, current_size_dm_nurse[i] - 1);
+
+    for (i = 0; i < 3 * days; i++) {
+        if (current_size_dm_nurse[i] > 1) {
+            quicksort(dm_nurses_availability[i], 0, current_size_dm_nurse[i] - 1);
+        }
+    }
 
     algo_start = clock();
 
-    // add an opening bracket...
-    Change starts :
-    * We want to create a population of multiple G_BESTs from mandatory_only Genetic algorithm.
-    * We will have multiple only mandatory G_BESTs which will comprise the initial population for the next GA.
-    * Run applyIntegratedGA multiple times (10) and get as many violation free G_BESTs as possible.
-	// add a clsosing bracket
+    // =======================================================
+    // Run GA to get violation-free mandatory solutions
+    // =======================================================
+    printf("\nRunning mandatory-only GA (up to %d runs)...\n", N_MANDATORY_GA_RUNS);
 
-    printf("\nStarting mandatory GA...");
     for (i = 0, count = 0; i < N_MANDATORY_GA_RUNS; i++) {
-        if (count == POP_SIZE) break;
+        if (count >= POP_SIZE) break;
+
+        printf("  Mandatory GA run %d/%d...\n", i + 1, N_MANDATORY_GA_RUNS);
         applyIntegratedGA(type);
+
+        // Collect violation-free solutions
         for (j = 0; j < POP_SIZE; ++j) {
-            if (count == POP_SIZE) break;
-            printf("\nPOPULATION[%d][mandatory_count]: %d", j, POPULATION[j][mandatory_count]);
-            if (!POPULATION[j][mandatory_count]) {
+            if (count >= POP_SIZE) break;
+
+            if (POPULATION[j][mandatory_count] == 0) {  // No violations
                 memcpy(MANDATORY_POPULATION[count], POPULATION[j], mandatory_count * sizeof(int));
                 count++;
-                // printf("\n[population] chromosome: %d\n", j);
-                // for (int k = 0; k < mandatory_count; ++k) printf("%d, ", MANDATORY_POPULATION[j][k]);
+                printf("    ✓ Found violation-free solution %d/%d\n", count, POP_SIZE);
             }
         }
     }
-    if (count != POP_SIZE) {
-        printf("\nmandatory_only GA is not able to produce enough violation-free solutions. Increase the variable N_MANDATORY_GA_RUNS");
-        exit(EXIT_FAILURE);
+
+    if (count < POP_SIZE) {
+        fprintf(stderr, "\nWARNING: Only found %d/%d violation-free mandatory solutions\n", count, POP_SIZE);
+        fprintf(stderr, "Filling remaining slots with best available solutions...\n");
+
+        // Fill remaining slots with best available (even if they have violations)
+        for (j = 0; j < POP_SIZE && count < POP_SIZE; ++j) {
+            int already_added = 0;
+            for (int k = 0; k < count; ++k) {
+                if (memcmp(MANDATORY_POPULATION[k], POPULATION[j], mandatory_count * sizeof(int)) == 0) {
+                    already_added = 1;
+                    break;
+                }
+            }
+            if (!already_added) {
+                memcpy(MANDATORY_POPULATION[count], POPULATION[j], mandatory_count * sizeof(int));
+                count++;
+            }
+        }
     }
-    // add an opening bracket...
-    printf("\nNumber of iterations taken to get %d violation free mandatory chromosomes: %d\n", POP_SIZE, i);
-    
-    printf("\nPrinting population before appending optionals\n");
-    for (i = 0; i < POP_SIZE; ++i) {
-        printf("Chromosome %d: ", i + 1);
-        for (j = 0; j < mandatory_count; ++j)
-            printf("%d ", MANDATORY_POPULATION[i][j]);
-        putchar('\n');
-    }
-	// add a closing bracket
+
+    printf("Completed mandatory phase with %d solutions after %d GA runs\n", count, i);
+
+    // =======================================================
+    // PHASE 2: ALL PATIENTS (MANDATORY + OPTIONAL)
+    // =======================================================
+    printf("\n=======================================================\n");
+    printf("  PHASE 2: ALL PATIENTS (%d mandatory + %d optional)\n",
+        mandatory_count, optional_count);
+    printf("=======================================================\n");
 
     type = 'p';
     size = num_patients + 5;
     CHROMOSOME_SIZE_INTE_GA = size;
+
+    printf("Appending optional patients...\n");
     appendOptionals();
     resizeDataStructures();
 
-    // printf("\nPrinting population to check whether the optionals have been appended successfully or not\n");
-    // printPopulationInteGA(type);
-
-	for (i = 0; i < POP_SIZE; ++i) free(MANDATORY_POPULATION[i]);
+    // Free mandatory population storage
+    for (i = 0; i < POP_SIZE; ++i) {
+        free(MANDATORY_POPULATION[i]);
+    }
     free(MANDATORY_POPULATION);
-	MANDATORY_POPULATION = NULL; // Avoid dangling pointer
+    MANDATORY_POPULATION = NULL;
+
+    // Clean up temporary structures
     if (room_schedule) free_3d_array();
     if (rooms_requirement) cleanup_rooms_req(num_rooms);
     room_schedule = NULL;
     rooms_requirement = NULL;
+
+    printf("Running full GA with all patients...\n");
     applyIntegratedGA(type);
+
     algo_end = clock();
 
-    // add an opening bracket...
-    reset_valuesInteGA();
-    int violations = admitPatientsInteGA(G_BEST, 'p');
-    printf("\n\nPrinting G_BEST after final admitPatients function: \n");
-    for (i = 0; i < CHROMOSOME_SIZE_INTE_GA; ++i) printf("%d ", G_BEST[i]);
-
-    create_3d_array(type);
-    create_rooms_req();
-    int nurse_violations = nurseAllocationInteGA();
-    printf("\n\nFinal #Violations [admit_patients]: %d", findViolations();
-    printf("\n\nFinal #Violations [nurse]: %d", nurse_violations);
-	// add a closing bracket
+    // =======================================================
+    // FINAL EVALUATION
+    // =======================================================
+    printf("\n=======================================================\n");
+    printf("  FINAL EVALUATION\n");
+    printf("=======================================================\n");
 
     evaluateViolationsAndCost(G_BEST, 'p');
-    printf("\n\nFinal #Violations: %d\n", G_BEST[num_patients]);
-    printf("\n\nFinal #Cost: %d\n", G_BEST[num_patients + 1]);
 
-    create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, output_filename, save_dir);
-    //create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, "new_ga3", save_dir);
+    printf("\nFinal Results:\n");
+    printf("  Violations:      %d\n", G_BEST[num_patients]);
+    printf("  Cost:            %d\n", G_BEST[num_patients + 1]);
+    printf("  Fitness:         %d\n", G_BEST[CHROMOSOME_SIZE_INTE_GA - 1]);
+
+    // =======================================================
+    // SAVE OUTPUT JSON
+    // =======================================================
+    printf("\nSaving solution to: %s\n", output_path);
+
+    // Extract directory from output_path for compatibility
+    char output_dir[256] = ".";  // Default to current directory
+    char* last_slash = strrchr(output_path, '/');
+    if (last_slash != NULL) {
+        size_t dir_len = last_slash - output_path;
+        if (dir_len < sizeof(output_dir)) {
+            strncpy(output_dir, output_path, dir_len);
+            output_dir[dir_len] = '\0';
+        }
+    }
+    /*
+    // Extract just the filename without extension
+    char base_name[256];
+    const char* file_start = last_slash ? last_slash + 1 : output_path;
+    const char* extension = strrchr(file_start, '.');
+    size_t name_len = extension ? (size_t)(extension - file_start) : strlen(file_start);
+
+    if (name_len < sizeof(base_name)) {
+        strncpy(base_name, file_start, name_len);
+        base_name[name_len] = '\0';
+    }
+    else {
+        strncpy(base_name, file_start, sizeof(base_name) - 1);
+        base_name[sizeof(base_name) - 1] = '\0';
+    }
+    */
+    create_json_file(patients, num_patients, nurses, num_nurses, num_rooms, output_path);
+
+    // =======================================================
+    // CLEANUP
+    // =======================================================
+    printf("\nCleaning up memory...\n");
     free_occupants();
     free_patients();
     free_surgeons();
@@ -3954,19 +3902,32 @@ int main(void) {
     free_rooms();
     free_nurses();
     free_dm_nurses_availability();
-    free_3d_array();
-	cleanup_rooms_req(num_rooms);
+    if (room_schedule) free_3d_array();
+    if (rooms_requirement) cleanup_rooms_req(num_rooms);
     freeDataStructuresInteGA();
     free(weights);
-    weights = NULL; // Avoid dangling pointer
+    weights = NULL;
 
-    end = clock();    // End time
-    cpu_time_used = ((double)(end - start)) / (CLOCKS_PER_SEC * 60);
-    algo_cpu_time_used = ((double)(algo_end - algo_start)) / (CLOCKS_PER_SEC * 60);
+    // =======================================================
+    // TIMING REPORT
+    // =======================================================
+    end = clock();
+    cpu_time_used = ((double)(end - start)) / (CLOCKS_PER_SEC * 60.0);
+    algo_cpu_time_used = ((double)(algo_end - algo_start)) / (CLOCKS_PER_SEC * 60.0);
 
-    printf("\n\nTime taken by whole program: %f minutes.", cpu_time_used);
-    printf("\nTime taken by the Algorithm: %f minutes.\n", algo_cpu_time_used);
+    printf("\n=======================================================\n");
+    printf("  TIMING REPORT\n");
+    printf("=======================================================\n");
+    printf("Total time:      %.2f minutes (%.1f seconds)\n",
+        cpu_time_used, cpu_time_used * 60);
+    printf("Algorithm time:  %.2f minutes (%.1f seconds)\n",
+        algo_cpu_time_used, algo_cpu_time_used * 60);
+    printf("Overhead:        %.2f minutes (%.1f seconds)\n",
+        cpu_time_used - algo_cpu_time_used,
+        (cpu_time_used - algo_cpu_time_used) * 60);
+    printf("=======================================================\n");
+
+    printf("\n✓ Program completed successfully!\n\n");
+
     return 0;
 }
-
-//-------------------------------------------------------------------------------------------------------------------------------------------------------
